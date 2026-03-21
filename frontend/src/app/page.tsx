@@ -59,7 +59,7 @@ export default function HomePage() {
       {/* ── Top bar ──────────────────────────────────────────────────── */}
       <header className="shrink-0 flex items-center justify-between px-4 md:px-6 py-3 border-b border-border dark:border-border-dark bg-panel dark:bg-panel-dark">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-xl flex items-center justify-center shadow-sm border border-border bg-stone-100 text-accent-DEFAULT dark:bg-accent-DEFAULT dark:text-white dark:border-transparent">
+          <div className="w-8 h-8 rounded-xl flex items-center justify-center shadow-sm border border-border bg-stone-100 text-accent dark:bg-accent dark:text-white dark:border-transparent">
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
             </svg>
@@ -79,7 +79,7 @@ export default function HomePage() {
           {currentSources.length > 0 && (
             <button
               onClick={() => setSourcesOpen(o => !o)}
-              className="lg:hidden flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-full bg-accent-muted text-accent-DEFAULT dark:bg-accent-DEFAULT/20 dark:text-accent-light font-medium"
+              className="lg:hidden flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-full bg-accent-muted text-accent dark:bg-accent/20 dark:text-accent-light font-medium"
             >
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12" />
@@ -95,7 +95,7 @@ export default function HomePage() {
               title="Your identity"
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono transition-colors ${
                 userId
-                  ? 'text-accent-DEFAULT dark:text-accent-light bg-accent-muted/60 dark:bg-accent-DEFAULT/10 hover:bg-accent-muted dark:hover:bg-accent-DEFAULT/20'
+                  ? 'text-accent dark:text-accent-light bg-accent-muted/60 dark:bg-accent/10 hover:bg-accent-muted dark:hover:bg-accent/20'
                   : 'text-ink-faint dark:text-zinc-600 bg-stone-100 dark:bg-zinc-800 animate-pulse'
               }`}
             >
@@ -117,7 +117,7 @@ export default function HomePage() {
                   <div className="space-y-2.5">
                     {/* Status */}
                     <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full bg-accent-DEFAULT animate-pulse" />
+                      <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
                       <span className="text-xs font-medium text-ink-DEFAULT dark:text-zinc-100">
                         Recognized via Fingerprint
                       </span>
@@ -241,8 +241,8 @@ export default function HomePage() {
 function WelcomeScreen() {
   return (
     <div className="flex flex-col items-center justify-center h-full text-center px-4 py-16 animate-fade-in">
-      <div className="w-14 h-14 rounded-2xl bg-accent-DEFAULT/10 dark:bg-accent-DEFAULT/20 border border-accent-DEFAULT/20 flex items-center justify-center mb-5">
-        <svg className="w-7 h-7 text-accent-DEFAULT dark:text-accent-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <div className="w-14 h-14 rounded-2xl bg-accent/10 dark:bg-accent/20 border border-accent/20 flex items-center justify-center mb-5">
+        <svg className="w-7 h-7 text-accent dark:text-accent-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
         </svg>
       </div>

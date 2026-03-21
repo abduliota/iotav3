@@ -38,7 +38,7 @@ export function FeedbackButtons({ messageId, current, onFeedback }: Props) {
           className={clsx(
             'group flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-all duration-150',
             current === 1
-              ? 'bg-accent-muted text-accent-DEFAULT dark:bg-accent-DEFAULT/20 dark:text-accent-light'
+              ? 'bg-accent-muted text-accent dark:bg-accent/20 dark:text-accent-light'
               : 'text-ink-faint hover:text-ink-DEFAULT hover:bg-stone-100 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
           )}
         >
@@ -74,12 +74,12 @@ export function FeedbackButtons({ messageId, current, onFeedback }: Props) {
             onChange={e => setComment(e.target.value)}
             placeholder="What was wrong with this answer? (optional)"
             rows={2}
-            className="w-full text-xs px-3 py-2 rounded-lg border border-border dark:border-border-dark bg-surface dark:bg-surface-dark text-ink-DEFAULT dark:text-zinc-200 placeholder:text-ink-faint dark:placeholder:text-zinc-600 resize-none focus:outline-none focus:ring-1 focus:ring-accent-DEFAULT"
+            className="w-full text-xs px-3 py-2 rounded-lg border border-border dark:border-border-dark bg-surface dark:bg-surface-dark text-ink-DEFAULT dark:text-zinc-200 placeholder:text-ink-faint dark:placeholder:text-zinc-600 resize-none focus:outline-none focus:ring-1 focus:ring-accent"
           />
           <div className="flex gap-2 mt-1.5">
             <button
               onClick={submitComment}
-              className="text-xs px-3 py-1 rounded-md bg-accent-DEFAULT text-white hover:bg-accent-DEFAULT/90 transition-colors"
+              className="text-xs px-3 py-1 rounded-md bg-accent text-white hover:bg-accent/90 transition-colors"
             >
               Submit
             </button>

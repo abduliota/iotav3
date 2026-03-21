@@ -52,7 +52,7 @@ export function InputBar({ onSend, isLoading, disabled }: Props) {
             <button
               key={s}
               onClick={() => { setVal(s); textRef.current?.focus() }}
-              className="text-[11px] px-3 py-1.5 rounded-full border border-border dark:border-border-dark text-ink-muted dark:text-zinc-400 hover:border-accent-DEFAULT/50 hover:text-accent-DEFAULT dark:hover:text-accent-light hover:bg-accent-muted/30 transition-all duration-150 whitespace-nowrap"
+              className="text-[11px] px-3 py-1.5 rounded-full border border-border dark:border-border-dark text-ink-muted dark:text-zinc-400 hover:border-accent/50 hover:text-accent dark:hover:text-accent-light hover:bg-accent-muted/30 transition-all duration-150 whitespace-nowrap"
             >
               {s}
             </button>
@@ -66,7 +66,7 @@ export function InputBar({ onSend, isLoading, disabled }: Props) {
         'bg-panel dark:bg-panel-dark',
         isLoading || disabled
           ? 'border-border dark:border-border-dark opacity-60'
-          : 'border-border dark:border-border-dark focus-within:border-accent-DEFAULT/60 dark:focus-within:border-accent-light/40 focus-within:shadow-[0_0_0_3px_rgba(26,107,74,0.08)]'
+          : 'border-border dark:border-border-dark focus-within:border-accent/60 dark:focus-within:border-accent-light/40 focus-within:shadow-[0_0_0_3px_rgba(26,107,74,0.08)]'
       )}>
         <textarea
           ref={textRef}
@@ -86,7 +86,7 @@ export function InputBar({ onSend, isLoading, disabled }: Props) {
           className={clsx(
             'shrink-0 w-8 h-8 rounded-xl flex items-center justify-center transition-all duration-150',
             value.trim() && !isLoading && !disabled
-              ? 'bg-accent-muted text-accent-DEFAULT border border-accent-DEFAULT/30 hover:bg-accent-muted/80 dark:bg-accent-DEFAULT dark:text-white dark:border-transparent dark:hover:bg-accent-DEFAULT/90 shadow-sm hover:shadow'
+              ? 'bg-accent-muted text-accent border border-accent/30 hover:bg-accent-muted/80 dark:bg-accent dark:text-white dark:border-transparent dark:hover:bg-accent/90 shadow-sm hover:shadow'
               : 'bg-stone-100 dark:bg-zinc-800 text-ink-faint dark:text-zinc-600 cursor-not-allowed'
           )}
         >

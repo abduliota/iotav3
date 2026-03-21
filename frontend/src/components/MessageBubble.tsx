@@ -19,7 +19,7 @@ export function MessageBubble({ message, onFeedback }: Props) {
     return (
       <div className="flex justify-end animate-slide-up">
         <div className="max-w-[75%] md:max-w-[60%]">
-          <div className="bg-accent-DEFAULT text-white px-4 py-2.5 rounded-2xl rounded-tr-sm text-sm leading-relaxed shadow-sm">
+          <div className="bg-accent text-white px-4 py-2.5 rounded-2xl rounded-tr-sm text-sm leading-relaxed shadow-sm">
             {message.content}
           </div>
           <p className="text-[10px] text-ink-faint dark:text-zinc-600 text-right mt-1 mr-1">
@@ -35,8 +35,8 @@ export function MessageBubble({ message, onFeedback }: Props) {
     <div className="flex gap-3 animate-slide-up group">
       {/* Avatar */}
       <div className="shrink-0 mt-0.5">
-        <div className="w-7 h-7 rounded-full bg-accent-DEFAULT/10 dark:bg-accent-DEFAULT/20 border border-accent-DEFAULT/20 flex items-center justify-center">
-          <svg className="w-3.5 h-3.5 text-accent-DEFAULT dark:text-accent-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+        <div className="w-7 h-7 rounded-full bg-accent/10 dark:bg-accent/20 border border-accent/20 flex items-center justify-center">
+          <svg className="w-3.5 h-3.5 text-accent dark:text-accent-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
           </svg>
         </div>
@@ -53,7 +53,7 @@ export function MessageBubble({ message, onFeedback }: Props) {
               'prose prose-sm dark:prose-invert max-w-none',
               'prose-p:leading-relaxed prose-p:my-1.5',
               'prose-strong:text-ink-DEFAULT dark:prose-strong:text-zinc-100',
-              'prose-code:text-accent-DEFAULT dark:prose-code:text-accent-light',
+              'prose-code:text-accent dark:prose-code:text-accent-light',
               'prose-code:bg-stone-100 dark:prose-code:bg-zinc-800',
               'prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs',
               'text-ink-DEFAULT dark:text-zinc-200 text-sm',
@@ -65,7 +65,7 @@ export function MessageBubble({ message, onFeedback }: Props) {
 
             {/* Cursor blink while streaming */}
             {message.isStreaming && (
-              <span className="inline-block w-0.5 h-4 bg-accent-DEFAULT dark:bg-accent-light ml-0.5 animate-pulse align-middle" />
+              <span className="inline-block w-0.5 h-4 bg-accent dark:bg-accent-light ml-0.5 animate-pulse align-middle" />
             )}
 
             {/* Metadata row */}
@@ -90,7 +90,7 @@ export function MessageBubble({ message, onFeedback }: Props) {
 
                 {/* Source count chip — mobile only */}
                 {message.sources.length > 0 && (
-                  <span className="lg:hidden text-[10px] text-accent-DEFAULT dark:text-accent-light font-medium">
+                  <span className="lg:hidden text-[10px] text-accent dark:text-accent-light font-medium">
                     {message.sources.length} source{message.sources.length !== 1 ? 's' : ''}
                   </span>
                 )}

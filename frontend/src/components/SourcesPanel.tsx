@@ -25,7 +25,7 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
 
   return (
     <div
-      className="rounded-xl border border-border dark:border-border-dark bg-panel dark:bg-panel-dark p-3.5 space-y-2 hover:border-accent-DEFAULT/40 dark:hover:border-accent-light/30 transition-colors animate-slide-up cursor-pointer"
+      className="rounded-xl border border-border dark:border-border-dark bg-panel dark:bg-panel-dark p-3.5 space-y-2 hover:border-accent/40 dark:hover:border-accent-light/30 transition-colors animate-slide-up cursor-pointer"
       style={{ animationDelay: `${index * 60}ms` }}
       onClick={() => setExpanded(e => !e)}
     >
@@ -45,7 +45,7 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
         <span className={clsx(
           'shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded-full',
           pct >= 85
-            ? 'bg-accent-muted text-accent-DEFAULT dark:bg-accent-DEFAULT/20 dark:text-accent-light'
+            ? 'bg-accent-muted text-accent dark:bg-accent/20 dark:text-accent-light'
             : pct >= 70
               ? 'bg-amber-50 text-amber-600 dark:bg-amber-900/20 dark:text-amber-400'
               : 'bg-stone-100 text-ink-muted dark:bg-zinc-800 dark:text-zinc-400'
@@ -71,7 +71,7 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
             {source.snippet}
           </p>
           {source.snippet.length > 100 && (
-            <button className="text-[10px] text-accent-DEFAULT dark:text-accent-light mt-0.5 hover:underline">
+            <button className="text-[10px] text-accent dark:text-accent-light mt-0.5 hover:underline">
               {expanded ? 'less' : 'more'}
             </button>
           )}
