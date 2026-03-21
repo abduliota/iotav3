@@ -10,7 +10,7 @@ interface Props {
 }
 
 const SUGGESTIONS = [
-  'What is the LCR requirement?',
+  'What is SAMA?',
   'Explain SAMA cybersecurity framework',
   'What are NCA ECC controls?',
   'PDPL data subject rights',

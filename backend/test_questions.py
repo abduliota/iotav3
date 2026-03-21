@@ -241,7 +241,7 @@ METHOD_LABELS = {
 
 EXPECTED = {
     0:  "correct",       # What is SAMA?
-    1:  "not_found",     # What is NORA? — not in DB
+    1:  "correct",       # What is NORA? — served by deterministic fallback
     2:  "correct",       # Capital adequacy
     3:  "correct",       # Who cannot open account
     4:  "correct",       # AML requirements

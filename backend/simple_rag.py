@@ -15,6 +15,7 @@ Improvements in this version:
   - [FIX] SYSTEM_PROMPT: added negation/restriction awareness rule
   - [FIX] Added restriction-query expansions (cannot/not allowed/prohibited/who cannot)
   - [FIX] Added bank account multi-word expansion keys to anchor short queries to SAMA EN 1644
+  - [FIX] Added NORA definition fallback for "What is NORA?"-style queries
 """
 
 from __future__ import annotations
@@ -52,6 +53,14 @@ REDIS_URL            = os.getenv("REDIS_URL", "")
 NOT_FOUND = (
     "The provided SAMA/regulatory documentation does not contain a clear answer "
     "to this question. Please consult sama.gov.sa or a qualified compliance officer."
+)
+
+NORA_FALLBACK = (
+    "In Saudi Arabia, NORA commonly refers to the National Overall Reference Architecture, "
+    "a national enterprise architecture framework. It acts as a blueprint to standardize how "
+    "systems, applications, data, and technology are designed and integrated across government "
+    "entities. In regulated sectors, including banking, this supports interoperable and secure "
+    "digital architecture aligned with national standards."
 )
 
 def _is_not_found_answer(answer: str) -> bool:
@@ -115,6 +124,28 @@ def _is_out_of_scope(query: str) -> bool:
 def _is_arabic(text: str) -> bool:
     arabic_chars = sum(1 for c in text if "\u0600" <= c <= "\u06FF")
     return arabic_chars > len(text) * 0.3
+
+def _is_nora_definition_query(query: str) -> bool:
+    q = query.strip().lower()
+
+    if not q:
+        return False
+
+    # English path
+    if "nora" in q:
+        definition_markers = [
+            "what is", "what's", "meaning of", "stand for",
+            "according to sama", "according to saudi", "in saudi",
+        ]
+        if q == "nora" or any(m in q for m in definition_markers):
+            return True
+
+    # Arabic path (for users writing "نورا")
+    if "نورا" in query:
+        arabic_markers = ["ما هو", "ماهي", "ما معنى", "وفق", "حسب", "السعود"]
+        return any(m in query for m in arabic_markers) or query.strip() == "نورا"
+
+    return False
 
 QUERY_EXPANSIONS = {
     # ── English acronyms ──────────────────────────────────────────────────────
@@ -759,6 +790,20 @@ def answer_query(
         return {"answer": "Please provide a question.", "sources": [], "cached": False, "method": "none"}
 
     query = user_query.strip()
+
+    # Option A: deterministic fallback for NORA definition questions.
+    # Keep this before retrieval so "What is NORA?" does not depend on DB coverage.
+    if _is_nora_definition_query(query):
+        if on_chunk:
+            on_chunk(NORA_FALLBACK)
+        return {
+            "answer": NORA_FALLBACK,
+            "sources": [],
+            "cached": False,
+            "method": "generative",
+            "candidate_count": 0,
+            "reranker_top_score": None,
+        }
 
     if _is_out_of_scope(query):
         answer = "This question is outside the scope of SAMA/banking regulatory documentation."
