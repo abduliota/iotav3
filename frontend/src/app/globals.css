@@ -1,0 +1,103 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    height: 100%;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background-color: theme('colors.surface.DEFAULT');
+    color: theme('colors.ink.DEFAULT');
+  }
+
+  .dark body {
+    background-color: theme('colors.surface.dark');
+    color: #e4e4e7;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #d6d3d1;
+    border-radius: 99px;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background: #3f3f46;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #a8a29e;
+  }
+
+  /* Prose overrides for markdown rendering */
+  .prose pre {
+    @apply bg-stone-50 dark:bg-zinc-900 border border-border dark:border-border-dark rounded-xl text-xs overflow-x-auto;
+  }
+  .prose blockquote {
+    border-left-color: rgba(26, 107, 74, 0.4);
+    @apply text-ink-muted dark:text-zinc-400;
+  }
+  .prose h1, .prose h2, .prose h3 {
+    @apply font-display;
+  }
+  .prose table {
+    @apply text-xs;
+  }
+  .prose thead {
+    @apply bg-stone-50 dark:bg-zinc-800;
+  }
+  .prose th, .prose td {
+    @apply border border-border dark:border-border-dark px-3 py-1.5;
+  }
+}
+
+@layer utilities {
+  /* Line clamp utilities */
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* Shimmer gradient for skeleton loading */
+  .animate-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      #e7e5e4 0%,
+      #f5f4f2 50%,
+      #e7e5e4 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.8s ease-in-out infinite;
+  }
+  .dark .animate-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      #27272a 0%,
+      #3f3f46 50%,
+      #27272a 100%
+    );
+  }
+}
