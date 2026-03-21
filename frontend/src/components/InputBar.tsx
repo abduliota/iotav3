@@ -86,7 +86,7 @@ export function InputBar({ onSend, isLoading, disabled }: Props) {
           className={clsx(
             'shrink-0 w-8 h-8 rounded-xl flex items-center justify-center transition-all duration-150',
             value.trim() && !isLoading && !disabled
-              ? 'bg-accent-DEFAULT text-white hover:bg-accent-DEFAULT/90 shadow-sm hover:shadow'
+              ? 'bg-accent-muted text-accent-DEFAULT border border-accent-DEFAULT/30 hover:bg-accent-muted/80 dark:bg-accent-DEFAULT dark:text-white dark:border-transparent dark:hover:bg-accent-DEFAULT/90 shadow-sm hover:shadow'
               : 'bg-stone-100 dark:bg-zinc-800 text-ink-faint dark:text-zinc-600 cursor-not-allowed'
           )}
         >
@@ -104,7 +104,7 @@ export function InputBar({ onSend, isLoading, disabled }: Props) {
       </div>
 
       <p className="text-[10px] text-center text-ink-faint dark:text-zinc-700 px-2">
-        NORA answers from official SAMA, NCA, SDAIA, and Aramco regulatory documents only.
+        Answers only based on banking and regulations!
       </p>
     </div>
   )

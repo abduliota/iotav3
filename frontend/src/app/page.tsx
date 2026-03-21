@@ -6,7 +6,6 @@ import { MessageBubble } from '@/components/MessageBubble'
 import { SourcesPanel } from '@/components/SourcesPanel'
 import { InputBar } from '@/components/InputBar'
 import { Source } from '@/types'
-import clsx from 'clsx'
 
 export default function HomePage() {
   const {
@@ -60,20 +59,17 @@ export default function HomePage() {
       {/* ── Top bar ──────────────────────────────────────────────────── */}
       <header className="shrink-0 flex items-center justify-between px-4 md:px-6 py-3 border-b border-border dark:border-border-dark bg-panel dark:bg-panel-dark">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-xl bg-accent-DEFAULT flex items-center justify-center shadow-sm">
-            <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+          <div className="w-8 h-8 rounded-xl flex items-center justify-center shadow-sm border border-border bg-stone-100 text-accent-DEFAULT dark:bg-accent-DEFAULT dark:text-white dark:border-transparent">
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
             </svg>
           </div>
           <div>
             <h1 className="text-sm font-semibold text-ink-DEFAULT dark:text-zinc-100 font-display leading-tight">
-              Saudi GRC Compliance Assistant
+              IOTA AI
             </h1>
             <p className="text-[11px] text-ink-faint dark:text-zinc-500 leading-none mt-0.5">
-              Ask about{' '}
-              <span className="text-ink-muted dark:text-zinc-400">SAMA, NORA, Aramco CCC,{' '}</span>
-              <span className="text-accent-DEFAULT dark:text-accent-light">NCA ECC, PDPL,</span>
-              {' '}and ISO 27k.
+              Ask questions about SAMA Regulations
             </p>
           </div>
         </div>
@@ -97,12 +93,11 @@ export default function HomePage() {
             <button
               onClick={() => setShowIdentity(o => !o)}
               title="Your identity"
-              className={clsx(
-                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono transition-colors',
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono transition-colors ${
                 userId
                   ? 'text-accent-DEFAULT dark:text-accent-light bg-accent-muted/60 dark:bg-accent-DEFAULT/10 hover:bg-accent-muted dark:hover:bg-accent-DEFAULT/20'
                   : 'text-ink-faint dark:text-zinc-600 bg-stone-100 dark:bg-zinc-800 animate-pulse'
-              )}
+              }`}
             >
               {/* Fingerprint icon */}
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
@@ -227,7 +222,7 @@ export default function HomePage() {
           <div className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-panel dark:bg-panel-dark rounded-t-2xl border-t border-border dark:border-border-dark max-h-[70vh] flex flex-col animate-slide-up shadow-2xl">
             <div className="flex items-center justify-between px-4 py-3 border-b border-border dark:border-border-dark">
               <h3 className="text-sm font-semibold text-ink-DEFAULT dark:text-zinc-100">Sources</h3>
-              <button onClick={() => setSourcesOpen(false)} className="p-1.5 rounded-lg hover:bg-stone-100 dark:hover:bg-zinc-800 text-ink-muted dark:text-zinc-400">
+              <button title="Close sources" onClick={() => setSourcesOpen(false)} className="p-1.5 rounded-lg hover:bg-stone-100 dark:hover:bg-zinc-800 text-ink-muted dark:text-zinc-400">
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
                 </svg>
@@ -252,10 +247,10 @@ function WelcomeScreen() {
         </svg>
       </div>
       <h2 className="text-lg font-semibold text-ink-DEFAULT dark:text-zinc-100 font-display mb-2">
-        IOTAV3 Assistant
+        IOTA AI
       </h2>
       <p className="text-sm text-ink-muted dark:text-zinc-400 max-w-xs leading-relaxed">
-        Ask a question about SAMA/NORA regulations to get started.
+        Ask questions about SAMA Regulations
       </p>
     </div>
   )
