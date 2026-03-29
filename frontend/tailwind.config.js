@@ -5,39 +5,39 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['var(--font-body)', 'system-ui', 'sans-serif'],
+        sans:    ['var(--font-body)', 'system-ui', 'sans-serif'],
         display: ['var(--font-display)', 'system-ui', 'sans-serif'],
-        mono: ['var(--font-mono)', 'monospace'],
+        mono:    ['var(--font-mono)', 'monospace'],
       },
       colors: {
         surface: {
-          DEFAULT: '#f8f7f4',
-          dark: '#0f0f11',
+          DEFAULT: '#eef2f7',   // blue-grey page background (matches reference)
+          dark:    '#0f0f11',
         },
         panel: {
           DEFAULT: '#ffffff',
-          dark: '#18181b',
+          dark:    '#18181b',
         },
         border: {
-          DEFAULT: '#e5e3de',
-          dark: '#27272a',
+          DEFAULT: '#e2e8f0',   // slightly cooler border to match blue theme
+          dark:    '#27272a',
         },
         accent: {
-          DEFAULT: '#1a6b4a',
-          light: '#22c55e',
-          muted: '#dcfce7',
+          DEFAULT: '#3b3fd8',   // indigo-blue (matches reference buttons)
+          light:   '#6366f1',   // lighter indigo for dark mode
+          muted:   '#e0e7ff',   // indigo tint for pill backgrounds
         },
         ink: {
           DEFAULT: '#1c1917',
-          muted: '#78716c',
-          faint: '#a8a29e',
+          muted:   '#78716c',
+          faint:   '#a8a29e',
         },
       },
       animation: {
-        'fade-in': 'fadeIn 0.3s ease-out',
-        'slide-up': 'slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1)',
-        'pulse-dot': 'pulseDot 1.4s ease-in-out infinite',
-        'shimmer': 'shimmer 1.8s ease-in-out infinite',
+        'fade-in':      'fadeIn 0.3s ease-out',
+        'slide-up':     'slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1)',
+        'pulse-dot':    'pulseDot 1.4s ease-in-out infinite',
+        'shimmer':      'shimmer 1.8s ease-in-out infinite',
         'token-appear': 'tokenAppear 0.15s ease-out',
       },
       keyframes: {
@@ -64,9 +64,7 @@ module.exports = {
       },
     },
   },
-
   safelist: [
-    // Custom color opacity variants that Tailwind JIT can't infer from dynamic classes
     'bg-accent-DEFAULT/10', 'bg-accent-DEFAULT/20', 'bg-accent-DEFAULT/30',
     'border-accent-DEFAULT/20', 'border-accent-DEFAULT/40', 'border-accent-DEFAULT/60',
     'hover:border-accent-DEFAULT/40', 'hover:border-accent-DEFAULT/50',

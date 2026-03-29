@@ -54,6 +54,8 @@ Thumbs.db
 .claude/
 CLAUDE.md
 Info.md
+meeting.md
+backend/PDFs/
 backend/downloaded_pdfs/
 backend/test_logs/
 backend/scraper.log

@@ -2,21 +2,19 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { v4 as uuidv4 } from 'uuid'
-import { Message, Source } from '@/types'
-import { streamQuery, submitFeedback, fetchSessionMessages } from '@/lib/api'
+import { Message, Source, Conversation } from '@/types'
+import { streamQuery, submitFeedback, fetchSessionMessages, fetchConversations } from '@/lib/api'
 import { getUserId, getSessionId, newSession } from '@/lib/identity'
 
 export function useChat() {
-  const [messages,  setMessages]  = useState<Message[]>([])
-  const [isLoading, setIsLoading] = useState(false)
-  const [error,     setError]     = useState<string | null>(null)
+  const [messages,       setMessages]       = useState<Message[]>([])
+  const [isLoading,      setIsLoading]      = useState(false)
+  const [error,          setError]          = useState<string | null>(null)
+  const [conversations,  setConversations]  = useState<Conversation[]>([])
 
-  // Use refs for userId + sessionId so callbacks always see the latest value
-  // without needing to be re-created (fixes stale closure bugs)
   const userIdRef    = useRef<string>('')
   const sessionIdRef = useRef<string>('')
 
-  // Also keep state versions for components that need to render them
   const [userId,    setUserId]    = useState<string>('')
   const [sessionId, setSessionId] = useState<string>('')
 
@@ -53,7 +51,48 @@ export function useChat() {
         })
         setMessages(restored)
       }).catch(console.error)
+
+      // Load conversation history for sidebar
+      fetchConversations(uid).then(convs => {
+        setConversations(convs)
+      }).catch(console.error)
     }).catch(console.error)
+  }, [])
+
+  // ── Load a past conversation ───────────────────────────────────────────────
+  const loadConversation = useCallback(async (targetSessionId: string) => {
+    if (targetSessionId === sessionIdRef.current) return
+
+    sessionIdRef.current = targetSessionId
+    setSessionId(targetSessionId)
+    setMessages([])
+    setError(null)
+
+    try {
+      const history = await fetchSessionMessages(targetSessionId)
+      if (!history.length) return
+      const restored: Message[] = []
+      history.forEach(m => {
+        restored.push({
+          id:        m.message_id + '_user',
+          role:      'user',
+          content:   m.user_message,
+          sources:   [],
+          timestamp: new Date(m.timestamp),
+        })
+        restored.push({
+          id:        m.message_id,
+          role:      'assistant',
+          content:   m.assistant_message,
+          sources:   [],
+          timestamp: new Date(m.timestamp),
+          feedback:  null,
+        })
+      })
+      setMessages(restored)
+    } catch (err) {
+      console.error('[loadConversation]', err)
+    }
   }, [])
 
   // ── Send message ───────────────────────────────────────────────────────────
@@ -61,7 +100,6 @@ export function useChat() {
     if (!query.trim() || isLoading) return
     setError(null)
 
-    // Always read from refs — never stale
     const uid = userIdRef.current || 'anon'
     const sid = sessionIdRef.current || getSessionId()
 
@@ -111,6 +149,8 @@ export function useChat() {
                   isStreaming: false, method, cached, feedback: null }
               : m
           ))
+          // Refresh conversations list after sending a message
+          fetchConversations(uid).then(convs => setConversations(convs)).catch(() => {})
         } else if (chunk.type === 'error') {
           throw new Error(chunk.message || 'Stream error')
         }
@@ -125,7 +165,7 @@ export function useChat() {
     } finally {
       setIsLoading(false)
     }
-  }, [isLoading])   // ← no userId/sessionId deps needed — we use refs
+  }, [isLoading])
 
   // ── Feedback ───────────────────────────────────────────────────────────────
   const giveFeedback = useCallback(async (
@@ -133,7 +173,6 @@ export function useChat() {
     feedback:  1 | 0,
     comment?:  string,
   ) => {
-    // Read refs directly — always current values, never stale
     const uid = userIdRef.current
     const sid = sessionIdRef.current
 
@@ -142,14 +181,10 @@ export function useChat() {
       return
     }
 
-    // Optimistic UI update
     setMessages(prev => prev.map(m =>
       m.id === messageId ? { ...m, feedback } : m
     ))
 
-    // Get the message content using functional state update trick
-    // (we can't read messages state here without stale closure)
-    // Instead, pass the values we already have
     setMessages(prev => {
       const msgIndex = prev.findIndex(m => m.id === messageId)
       const msg      = prev[msgIndex]
@@ -157,7 +192,6 @@ export function useChat() {
 
       if (!msg) return prev
 
-      // Fire-and-forget DB call
       submitFeedback({
         sessionId:        sid,
         userId:           uid,
@@ -168,9 +202,9 @@ export function useChat() {
         assistantMessage: msg.content,
       }).catch(e => console.error('[feedback] submit failed:', e))
 
-      return prev   // no state change here — we already updated above
+      return prev
     })
-  }, [])   // ← no deps needed — uses refs and functional state
+  }, [])
 
   // ── New conversation ───────────────────────────────────────────────────────
   const startNewConversation = useCallback(() => {
@@ -187,8 +221,10 @@ export function useChat() {
     error,
     userId,
     sessionId,
+    conversations,
     sendMessage,
     giveFeedback,
     startNewConversation,
+    loadConversation,
   }
 }

@@ -6,20 +6,20 @@ Endpoints:
   POST /api/query-stream        — structured NDJSON streaming
   POST /api/feedback            — save like/dislike feedback
   GET  /api/session/{id}/messages — fetch past messages for a session
+  GET  /api/conversations       — list all sessions for a user (NEW)
+  GET  /api/documents           — list ingested documents (NEW)
+  GET  /admin/stats             — system metrics (NEW)
   GET  /admin/cache/status
   POST /admin/cache/clear
-
-[FIX] session_summary is now passed as a dedicated kwarg to answer_query()
-      instead of being prepended to the raw query string. This prevents the
-      summary from corrupting the embedding / retrieval path on every 6th,
-      12th, 18th message in a session.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
+import time as _time
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Generator
 
@@ -40,7 +40,12 @@ log = logging.getLogger("api")
 
 from simple_rag import answer_query
 
-# ── Supabase client (reuse from simple_rag or create new) ────────────────────
+# ── Rolling stats trackers ────────────────────────────────────────────────────
+_request_times: list[float] = []   # response times in ms, last 50
+_cache_hits:    int          = 0
+_cache_total:   int          = 0
+
+# ── Supabase client ───────────────────────────────────────────────────────────
 _sb = None
 
 def get_sb():
@@ -54,9 +59,8 @@ def get_sb():
     return _sb
 
 # ── App setup ─────────────────────────────────────────────────────────────────
-app = FastAPI(title="SAMA NORA Chatbot", version="3.1.0")
+app = FastAPI(title="SAMA NORA Chatbot", version="3.2.0")
 
-# Allow Next.js dev (3000) + prod domain + any configured origins
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000")
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
@@ -101,7 +105,7 @@ class FeedbackRequest(BaseModel):
     session_id:        str
     user_id:           str
     message_id:        str
-    feedback:          int          # 1 = like, 0 = dislike
+    feedback:          int
     comments:          str | None = None
     user_message:      str | None = None
     assistant_message: str | None = None
@@ -110,29 +114,21 @@ class FeedbackRequest(BaseModel):
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _ensure_user(user_id: str) -> None:
-    """Insert user row if not exists.
-    NOTE: 'user' is a reserved word in PostgreSQL. The Supabase Python client
-    handles this correctly when you pass the string "user" to .table(), but
-    we add explicit error logging to catch any silent failures.
-    """
     try:
-        resp = get_sb().table("user").upsert(
+        get_sb().table("user").upsert(
             {"user_id": user_id},
             on_conflict="user_id",
         ).execute()
-        log.info(f"[db] user upserted: {user_id[:12]}...")
     except Exception as e:
         log.error(f"[db] ensure_user FAILED for {user_id[:12]}: {e}")
 
 
 def _ensure_session(session_id: str, user_id: str) -> None:
-    """Insert session row if not exists."""
     try:
-        resp = get_sb().table("session").upsert(
+        get_sb().table("session").upsert(
             {"session_id": session_id, "user_id": user_id},
             on_conflict="session_id",
         ).execute()
-        log.info(f"[db] session upserted: {session_id[:12]}...")
     except Exception as e:
         log.error(f"[db] ensure_session FAILED for {session_id[:12]}: {e}")
 
@@ -144,16 +140,14 @@ def _save_message(
     user_message: str,
     assistant_message: str,
 ) -> None:
-    """Insert Q&A pair into session_messages."""
     try:
-        resp = get_sb().table("session_messages").insert({
+        get_sb().table("session_messages").insert({
             "message_id":        message_id,
             "session_id":        session_id,
             "user_id":           user_id,
             "user_message":      user_message,
             "assistant_message": assistant_message,
         }).execute()
-        log.info(f"[db] message saved: {message_id[:12]}...")
     except Exception as e:
         log.error(f"[db] save_message FAILED for {message_id[:12]}: {e}")
 
@@ -165,24 +159,19 @@ def _persist_interaction(
     assistant_message: str,
     message_id: str,
 ) -> None:
-    """Full persistence flow: user → session → message."""
     if not user_id or not session_id:
-        log.warning(f"[db] persist_interaction skipped — missing user_id={user_id!r} session_id={session_id!r}")
         return
-    log.info(f"[db] persisting interaction user={user_id[:12]} session={session_id[:12]} msg={message_id[:12]}")
     _ensure_user(user_id)
     _ensure_session(session_id, user_id)
     _save_message(message_id, session_id, user_id, user_message, assistant_message)
-    # After saving, check if it's time to update the rolling summary
     _maybe_update_summary(session_id, user_id)
 
 
 # ── Rolling summary helpers ───────────────────────────────────────────────────
 
-SUMMARY_EVERY_N = 6   # regenerate summary every N messages
+SUMMARY_EVERY_N = 6
 
 def _get_message_count(session_id: str) -> int:
-    """Return how many messages exist for this session."""
     try:
         resp = (
             get_sb()
@@ -198,7 +187,6 @@ def _get_message_count(session_id: str) -> int:
 
 
 def _fetch_last_n_messages(session_id: str, n: int = 6) -> list[dict]:
-    """Fetch the last N Q&A pairs for summarisation."""
     try:
         resp = (
             get_sb()
@@ -209,7 +197,6 @@ def _fetch_last_n_messages(session_id: str, n: int = 6) -> list[dict]:
             .limit(n)
             .execute()
         )
-        # Reverse so chronological order (oldest first)
         return list(reversed(resp.data or []))
     except Exception as e:
         log.warning(f"[summary] fetch_last_n failed: {e}")
@@ -217,7 +204,6 @@ def _fetch_last_n_messages(session_id: str, n: int = 6) -> list[dict]:
 
 
 def _generate_summary(messages: list[dict], existing_summary: str = "") -> str:
-    """Call GPT-4o-mini to produce a 2-3 sentence rolling summary."""
     try:
         import openai
         history_text = "\n".join(
@@ -228,8 +214,7 @@ def _generate_summary(messages: list[dict], existing_summary: str = "") -> str:
         prompt = (
             f"{prior}Recent conversation:\n{history_text}\n\n"
             "Summarise what the user has been asking about in 2-3 concise sentences. "
-            "Focus on the regulatory topics covered. Be specific (mention regulation names, "
-            "frameworks, specific questions). This will be used as context for future answers."
+            "Focus on the regulatory topics covered."
         )
         client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
         resp = client.chat.completions.create(
@@ -238,12 +223,10 @@ def _generate_summary(messages: list[dict], existing_summary: str = "") -> str:
             max_tokens=120,
             temperature=0.2,
         )
-        summary = resp.choices[0].message.content.strip()
-        log.info(f"[summary] generated: {summary[:80]}...")
-        return summary
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         log.error(f"[summary] generate failed: {e}")
-        return existing_summary  # fall back to existing summary on error
+        return existing_summary
 
 
 def _upsert_summary(session_id: str, user_id: str, summary: str, count: int) -> None:
@@ -255,19 +238,15 @@ def _upsert_summary(session_id: str, user_id: str, summary: str, count: int) -> 
             "summary_json":  "{}",
             "message_count": count,
         }, on_conflict="session_id").execute()
-        log.info(f"[summary] upserted for session {session_id[:12]}")
     except Exception as e:
         log.error(f"[summary] upsert failed: {e}")
 
 
 def _maybe_update_summary(session_id: str, user_id: str) -> None:
-    """Regenerate rolling summary every SUMMARY_EVERY_N messages."""
     try:
         count = _get_message_count(session_id)
         if count % SUMMARY_EVERY_N != 0:
-            return   # not time yet
-        log.info(f"[summary] triggering update at message count={count}")
-        # Fetch existing summary for continuity
+            return
         existing = ""
         try:
             ex = (
@@ -292,7 +271,6 @@ def _maybe_update_summary(session_id: str, user_id: str) -> None:
 
 
 def _get_session_summary(session_id: str) -> str:
-    """Fetch the current rolling summary for a session. Returns empty string if none."""
     if not session_id:
         return ""
     try:
@@ -315,7 +293,7 @@ def _get_session_summary(session_id: str) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "3.1.0"}
+    return {"status": "ok", "version": "3.2.0"}
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -323,28 +301,19 @@ def query_endpoint(req: QueryRequest):
     if not req.query or not req.query.strip():
         raise HTTPException(status_code=400, detail="query cannot be empty")
 
-    message_id = str(uuid.uuid4())
-
-    # [FIX] Fetch the rolling summary but pass it as a dedicated kwarg to
-    # answer_query() — do NOT prepend it to the query string. Prepending
-    # it corrupted the embedding vector (pulling retrieval toward the summary
-    # topic rather than the actual question).
+    message_id      = str(uuid.uuid4())
     session_summary = _get_session_summary(req.session_id)
 
     result = answer_query(
-        req.query,                      # clean query — no summary mixed in
+        req.query,
         top_k=req.top_k,
         debug=req.debug,
-        session_summary=session_summary, # goes to LLM prompt only
+        session_summary=session_summary,
     )
 
-    # Persist to DB (non-blocking — we don't fail the request if this errors)
     _persist_interaction(
-        req.user_id,
-        req.session_id,
-        req.query,
-        result.get("answer", ""),
-        message_id,
+        req.user_id, req.session_id,
+        req.query, result.get("answer", ""), message_id,
     )
 
     return QueryResponse(
@@ -360,43 +329,42 @@ def query_endpoint(req: QueryRequest):
 
 @app.post("/api/query-stream")
 def query_stream_endpoint(req: QueryRequest):
-    """
-    Structured NDJSON stream. Each line is a JSON object:
-
-      {"type": "token",   "text": "word "}          — one token/word at a time
-      {"type": "sources", "sources": [...],
-       "message_id": "uuid", "cached": bool,
-       "method": "generative|cached|not_found"}      — sent once, after all tokens
-      {"type": "done"}                               — stream ended
-      {"type": "error",  "message": "..."}           — on failure
-    """
     if not req.query or not req.query.strip():
         raise HTTPException(status_code=400, detail="query cannot be empty")
 
     def generate() -> Generator[str, None, None]:
+        global _cache_total, _cache_hits
         message_id = str(uuid.uuid4())
 
         try:
-            # [FIX] Same fix as query_endpoint: summary passed as kwarg,
-            # not prepended to the query string.
+            t_start         = _time.perf_counter()
             session_summary = _get_session_summary(req.session_id)
 
             result = answer_query(
-                req.query,                       # clean query — no summary mixed in
+                req.query,
                 top_k=req.top_k,
                 debug=req.debug,
-                session_summary=session_summary,  # goes to LLM prompt only
+                session_summary=session_summary,
             )
+
+            # Track response time and cache stats
+            elapsed_ms = (_time.perf_counter() - t_start) * 1000
+            _request_times.append(elapsed_ms)
+            if len(_request_times) > 50:
+                _request_times.pop(0)
+            _cache_total += 1
+            if result.get("cached"):
+                _cache_hits += 1
 
             answer = result.get("answer", "")
 
-            # ── Stream tokens word-by-word ─────────────────────────────────
+            # Stream tokens word-by-word
             words = answer.split(" ")
             for i, word in enumerate(words):
                 token = word + (" " if i < len(words) - 1 else "")
                 yield json.dumps({"type": "token", "text": token}) + "\n"
 
-            # ── Send sources + metadata ────────────────────────────────────
+            # Send sources + metadata
             sources_payload = []
             for s in result.get("sources", []):
                 sources_payload.append({
@@ -418,13 +386,9 @@ def query_stream_endpoint(req: QueryRequest):
 
             yield json.dumps({"type": "done"}) + "\n"
 
-            # ── Persist to DB after stream completes ───────────────────────
             _persist_interaction(
-                req.user_id,
-                req.session_id,
-                req.query,
-                answer,
-                message_id,
+                req.user_id, req.session_id,
+                req.query, answer, message_id,
             )
 
         except Exception as e:
@@ -435,7 +399,6 @@ def query_stream_endpoint(req: QueryRequest):
         generate(),
         media_type="application/x-ndjson",
         headers={
-            # Required for streaming to work through proxies/browsers
             "X-Accel-Buffering":  "no",
             "Cache-Control":      "no-cache",
             "Transfer-Encoding":  "chunked",
@@ -445,29 +408,21 @@ def query_stream_endpoint(req: QueryRequest):
 
 @app.post("/api/feedback")
 def feedback_endpoint(req: FeedbackRequest):
-    """
-    Save a like (1) or dislike (0) for a message.
-    Also stores the Q&A text for future LLM fine-tuning.
-    """
     if req.feedback not in (0, 1):
-        raise HTTPException(status_code=400, detail="feedback must be 0 (dislike) or 1 (like)")
+        raise HTTPException(status_code=400, detail="feedback must be 0 or 1")
 
-    log.info(f"[feedback] saving vote={req.feedback} msg={req.message_id[:12]} user={req.user_id[:12]} comments={req.comments!r}")
     try:
-        # Build insert payload — only include optional fields if they have values
-        # (avoids PGRST204 if columns don't exist yet in the schema cache)
         payload: dict = {
-            "session_id":  req.session_id,
-            "user_id":     req.user_id,
-            "message_id":  req.message_id,
-            "feedback":    req.feedback,
+            "session_id": req.session_id,
+            "user_id":    req.user_id,
+            "message_id": req.message_id,
+            "feedback":   req.feedback,
         }
         if req.comments          is not None: payload["comments"]          = req.comments
         if req.user_message      is not None: payload["user_message"]      = req.user_message
         if req.assistant_message is not None: payload["assistant_message"] = req.assistant_message
 
-        resp = get_sb().table("session_feedback").insert(payload).execute()
-        log.info(f"[feedback] saved OK: {resp.data}")
+        get_sb().table("session_feedback").insert(payload).execute()
         return {"status": "ok", "feedback": req.feedback}
     except Exception as e:
         log.error(f"[feedback] DB insert FAILED: {e}", exc_info=True)
@@ -476,10 +431,6 @@ def feedback_endpoint(req: FeedbackRequest):
 
 @app.get("/api/session/{session_id}/messages")
 def get_session_messages(session_id: str, limit: int = 20):
-    """
-    Return the last `limit` messages for a session (for conversation reload on refresh).
-    Returns list of {message_id, user_message, assistant_message, timestamp}
-    """
     try:
         resp = (
             get_sb()
@@ -496,7 +447,175 @@ def get_session_messages(session_id: str, limit: int = 20):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Cache admin endpoints ─────────────────────────────────────────────────────
+# ── NEW: Conversations list ───────────────────────────────────────────────────
+
+@app.get("/api/conversations")
+def list_conversations(user_id: str = "", limit: int = 50):
+    """Return all sessions for a user, sorted newest first, with title = first message."""
+    if not user_id:
+        return {"conversations": []}
+    try:
+        resp = (
+            get_sb()
+            .table("session_messages")
+            .select("session_id, user_message, timestamp")
+            .eq("user_id", user_id)
+            .order("timestamp", desc=False)
+            .execute()
+        )
+        rows = resp.data or []
+
+        # First message per session = title, track last timestamp + count
+        seen: dict = {}
+        for row in rows:
+            sid = row["session_id"]
+            if sid not in seen:
+                title = (row.get("user_message") or "New conversation")[:40]
+                seen[sid] = {
+                    "session_id":      sid,
+                    "title":           title,
+                    "last_message_at": row["timestamp"],
+                    "message_count":   1,
+                }
+            else:
+                seen[sid]["last_message_at"] = row["timestamp"]
+                seen[sid]["message_count"]  += 1
+
+        conversations = sorted(
+            seen.values(),
+            key=lambda x: x["last_message_at"],
+            reverse=True,
+        )
+        return {"conversations": conversations[:limit]}
+    except Exception as e:
+        log.error(f"[conversations] failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── NEW: Documents list ───────────────────────────────────────────────────────
+
+@app.get("/api/documents")
+def list_documents(search: str = "", limit: int = 20):
+    """
+    Return all documents from the documents table as the source of truth,
+    with chunk counts joined from sama_nora_chunks.
+    Documents with 0 chunks are included (shown as 0 chunks).
+    Sorted by chunk_count DESC so most useful docs appear first.
+    """
+    try:
+        # Primary source: documents table — all registered documents
+        doc_resp = (
+            get_sb()
+            .table("documents")
+            .select("document_name, source_type, total_pages")
+            .execute()
+        )
+        all_docs = doc_resp.data or []
+
+        # Secondary: chunk counts from sama_nora_chunks
+        chunks_resp = (
+            get_sb()
+            .table("sama_nora_chunks")
+            .select("document_name")
+            .execute()
+        )
+        chunk_counts = Counter(r["document_name"] for r in (chunks_resp.data or []))
+
+        # Deduplicate documents by name (documents table can have duplicates
+        # from bad scrape runs) — keep the one with a real source_type if available
+        seen: dict[str, dict] = {}
+        for doc in all_docs:
+            name = doc.get("document_name", "").strip()
+            if not name:
+                continue
+            # Skip obviously bad entries (pure UUIDs, very short names)
+            if len(name) < 4:
+                continue
+            if name not in seen:
+                seen[name] = doc
+            else:
+                # Prefer the row that has a real source_type over NULL
+                if seen[name].get("source_type") is None and doc.get("source_type"):
+                    seen[name] = doc
+
+        # Build results list
+        results = []
+        for name, doc in seen.items():
+            if search and search.lower() not in name.lower():
+                continue
+            results.append({
+                "document_name": name,
+                "source_type":   doc.get("source_type") or "SAMA",
+                "total_pages":   doc.get("total_pages") or "?",
+                "chunk_count":   chunk_counts.get(name, 0),
+            })
+
+        # Sort by chunk count descending — most useful documents first
+        results.sort(key=lambda x: x["chunk_count"], reverse=True)
+
+        return {"documents": results[:limit], "total": len(results)}
+    except Exception as e:
+        log.error(f"[documents] list failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── NEW: System stats ─────────────────────────────────────────────────────────
+
+@app.get("/admin/stats")
+def admin_stats():
+    """Return system metrics for the dashboard info card."""
+    # Docs count
+    docs_count = 0
+    try:
+        d = get_sb().table("documents").select("id", count="exact").execute()
+        docs_count = d.count or 0
+    except Exception as e:
+        log.warning(f"[stats] docs count failed: {e}")
+
+    # Chunks count
+    chunks_count = 0
+    try:
+        c = get_sb().table("sama_nora_chunks").select("id", count="exact").execute()
+        chunks_count = c.count or 0
+    except Exception as e:
+        log.warning(f"[stats] chunks count failed: {e}")
+
+    # Redis cached answers
+    cached_answers = 0
+    try:
+        redis_url = os.getenv("REDIS_URL", "")
+        if redis_url:
+            import redis as redis_lib
+            r = redis_lib.from_url(
+                redis_url, socket_timeout=2,
+                socket_connect_timeout=2, decode_responses=False,
+            )
+            cached_answers = r.llen("sama:cache:embeddings")
+    except Exception:
+        pass
+
+    # Cache hit rate
+    hit_rate = 0.0
+    if _cache_total > 0:
+        hit_rate = round(_cache_hits / _cache_total * 100, 1)
+
+    # Avg response time
+    avg_ms = 0
+    if _request_times:
+        avg_ms = round(sum(_request_times) / len(_request_times))
+
+    return {
+        "api_status":         "ok",
+        "docs_ingested":      docs_count,
+        "total_chunks":       chunks_count,
+        "cached_answers":     cached_answers,
+        "cache_hit_rate_pct": hit_rate,
+        "avg_response_ms":    avg_ms,
+        "model":              os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    }
+
+
+# ── Existing cache admin endpoints ────────────────────────────────────────────
 
 @app.get("/admin/cache/status")
 def cache_status():

@@ -104,7 +104,7 @@ export function InputBar({ onSend, isLoading, disabled }: Props) {
       </div>
 
       <p className="text-[10px] text-center text-ink-faint dark:text-zinc-700 px-2">
-        Answers only based on banking and regulations!
+        Regulation AI can make mistakes. Always verify answers against the cited source documents.
       </p>
     </div>
   )

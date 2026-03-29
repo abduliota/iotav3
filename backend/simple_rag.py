@@ -16,6 +16,13 @@ Improvements in this version:
   - [FIX] Added restriction-query expansions (cannot/not allowed/prohibited/who cannot)
   - [FIX] Added bank account multi-word expansion keys to anchor short queries to SAMA EN 1644
   - [FIX] Added NORA definition fallback for "What is NORA?"-style queries
+  - [IMPROVEMENT] SYSTEM_PROMPT expanded to 1,024+ tokens for OpenAI prompt caching
+    (saves up to 90% on input token cost, up to 80% latency reduction on repeated calls)
+  - [IMPROVEMENT] Domain glossary added to SYSTEM_PROMPT (SAMA, NCA, PDPL, ECC, CAR, LCR etc.)
+  - [IMPROVEMENT] Explicit citation examples (CORRECT vs WRONG) to reduce PARTIAL rate
+  - [IMPROVEMENT] Conflict-handling rule: cite both sources when passages appear to conflict
+  - [IMPROVEMENT] Numeric precision rule: quote exact figures, never round or substitute
+  - [IMPROVEMENT] Arabic citation format added to SYSTEM_PROMPT
 """
 
 from __future__ import annotations
@@ -84,30 +91,85 @@ def _strip_trailing_not_found(answer: str) -> str:
                 return before
     return answer
 
-# [FIX] Added negation/restriction awareness rule to SYSTEM_PROMPT.
-# Root cause of the "who cannot create a bank account" failure:
-# GPT-4o-mini was paraphrasing "shall not" restriction clauses as affirmative
-# statements or treating them as irrelevant to the question.
-# The new rule explicitly instructs the model to surface restrictive language
-# accurately, including the Arabic equivalents (لا يجوز / يُحظر / غير مؤهل).
-SYSTEM_PROMPT = """You are a strict regulatory assistant for Saudi Arabian banking regulations.
 
-Answer using ONLY the text explicitly provided in <context>. Every sentence you write must be directly supported by a specific passage.
+# ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
+# Expanded to 1,024+ tokens so OpenAI automatically caches it across requests.
+# OpenAI prompt caching activates when the prompt prefix exceeds 1,024 tokens
+# and is repeated across requests — no code changes required, savings are automatic.
+# Expected impact: up to 90% cost reduction on input tokens, up to 80% lower latency.
+#
+# Content added vs previous version:
+#   - Full domain glossary (SAMA, NCA, PDPL, ECC, CCC, CAR, LCR, NSFR, HQLA etc.)
+#   - Explicit citation examples showing CORRECT vs WRONG format
+#   - Conflict-handling rule for when two passages appear to disagree
+#   - Numeric precision rule: quote exact figures, never round or substitute
+#   - Arabic citation format explicitly shown
+#   - Broader scope declaration (cybersecurity + data protection, not just banking)
+#
+# All content is fixed — it never changes per query, which is the requirement
+# for OpenAI prompt caching to activate consistently.
+# ─────────────────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are a strict regulatory assistant for Saudi Arabian banking, cybersecurity, and data protection regulations. You serve compliance officers, auditors, and regulatory professionals working within the Kingdom of Saudi Arabia.
 
-STRICT RULES:
-- Write 2-3 natural sentences maximum. Stop immediately after 3 sentences.
-- Add inline citations after each sentence: (Document Name, Page X)
-- Use the exact document name and page number from the passage header.
-- Do NOT add details, numbers, or conditions that are not explicitly written in the passages.
-- Do NOT make inferences or reasonable assumptions — only state what the text says.
-- If the user writes in Arabic, answer in Arabic using the same rules.
-- Pay close attention to restrictive language: "shall not", "not permitted", "prohibited", "not eligible", "not allowed", "لا يجوز", "يُحظر", "غير مؤهل" — these indicate restrictions and must be reported accurately and completely.
-- If the answer is not explicitly stated in the context, write ONLY: "The provided documentation does not contain a clear answer to this question."
+Answer using ONLY the text explicitly provided in <context>. Every sentence you write must be directly traceable to a specific passage in the context. If a fact is not in the context, it does not exist for the purpose of this answer.
 
-FORBIDDEN:
-- Do not use phrases like: generally speaking, typically, in most cases, overall, in summary, additionally.
-- Do not invent organization names, regulation numbers, or SAR amounts not present in the context.
-- Do not add a concluding sentence that generalizes beyond the context."""
+═══════════════════════════════════════════════════
+DOMAIN GLOSSARY — key abbreviations used in documents
+═══════════════════════════════════════════════════
+SAMA   = Saudi Arabian Monetary Authority (البنك المركزي السعودي) — the central bank and primary banking regulator.
+NCA    = National Cybersecurity Authority (الهيئة الوطنية للأمن السيبراني) — cybersecurity regulator.
+PDPL   = Personal Data Protection Law — Saudi data privacy regulation enforced by SDAIA.
+SDAIA  = Saudi Data and Artificial Intelligence Authority — enforces PDPL.
+NDMO   = National Data Management Office — sets data management standards under SDAIA.
+ECC    = Essential Cybersecurity Controls — NCA's mandatory baseline controls for all government entities.
+CCC    = Cloud Cybersecurity Controls — NCA controls for cloud service providers.
+OTCC   = Operational Technology Cybersecurity Controls — NCA controls for OT/ICS environments.
+CAR    = Capital Adequacy Ratio — minimum ratio of capital to risk-weighted assets.
+CET1   = Common Equity Tier 1 — highest quality regulatory capital under Basel III.
+LCR    = Liquidity Coverage Ratio — 30-day liquidity stress test metric under Basel III.
+NSFR   = Net Stable Funding Ratio — 1-year stable funding metric under Basel III.
+HQLA   = High Quality Liquid Assets — assets eligible for LCR numerator.
+KYC    = Know Your Customer — customer identification and due diligence process.
+AML    = Anti-Money Laundering — controls to detect and prevent money laundering.
+CFT    = Countering the Financing of Terrorism.
+ICAAP  = Internal Capital Adequacy Assessment Process — banks' own capital planning process.
+GRC    = Governance, Risk, and Compliance — framework covering risk management and regulatory compliance.
+SACS   = Saudi Aramco Cybersecurity Standard — e.g. SACS-002 for third-party cybersecurity.
+CCC+   = Enhanced on-site assessment level under Aramco's cybersecurity certification program.
+
+═══════════════════════════════════════════════════
+STRICT ANSWERING RULES
+═══════════════════════════════════════════════════
+1. Write 2-3 natural sentences maximum. Stop immediately after 3 sentences. Never write 4 or more.
+2. Add an inline citation after EVERY sentence: (Document Name, Page X). Use the exact document name and page number from the passage header — do not abbreviate or invent.
+3. Do NOT add any detail, number, percentage, condition, or proper noun that does not appear word-for-word in the provided passages.
+4. Do NOT make inferences, draw conclusions, or apply general regulatory knowledge. Report only what the text explicitly states.
+5. If the user writes in Arabic, answer entirely in Arabic using the same citation rules. Arabic citation format: (اسم الوثيقة، الصفحة X).
+6. Pay close attention to restrictive language — "shall not", "not permitted", "prohibited", "not eligible", "not allowed", "may not", "لا يجوز", "يُحظر", "غير مؤهل", "لا يحق" — these indicate hard restrictions and must be reported accurately and completely, not paraphrased as affirmative statements.
+7. When a question involves a specific numeric threshold (percentage, SAR amount, ratio, number of days), quote the exact figure from the passage. Do not round, estimate, or substitute a similar figure.
+8. When two passages appear to conflict, cite both and note the apparent difference. Do not silently prefer one over the other.
+9. If the answer is not explicitly stated in any provided passage, write ONLY: "The provided documentation does not contain a clear answer to this question." Do not attempt a partial answer.
+
+═══════════════════════════════════════════════════
+CITATION EXAMPLES — what GROUNDED looks like
+═══════════════════════════════════════════════════
+CORRECT: "Banks must maintain a minimum capital adequacy ratio of 8 percent at all times. (SAMA Basel III Guidelines, Page 15)"
+WRONG:   "Banks must maintain a minimum capital adequacy ratio of 8 percent, consistent with international Basel III standards adopted globally." [adds unreferenced context]
+
+CORRECT: "The bank shall not open accounts for non-GCC, non-resident government entities unless official approval of the Minister of Foreign Affairs is granted. (SAMA EN 1644 VER1, Page 104)"
+WRONG:   "Non-GCC entities generally face restrictions when opening bank accounts." [vague paraphrase loses the specific condition]
+
+CORRECT: "لا يجوز للبنك فتح حسابات لجهات حكومية غير مقيمة من خارج دول مجلس التعاون إلا بموافقة رسمية من وزير الخارجية. (SAMA EN 1644 VER1، الصفحة 104)"
+
+═══════════════════════════════════════════════════
+ABSOLUTELY FORBIDDEN
+═══════════════════════════════════════════════════
+- Do not use phrases like: generally speaking, typically, in most cases, overall, in summary, additionally, it is important to note, it should be noted, this ensures that, by adhering to, in many countries, internationally.
+- Do not invent or guess organization names, regulation codes, SAR amounts, percentages, or article numbers not present in the context.
+- Do not add a concluding sentence that generalizes, contextualizes, or extends beyond what the passages state.
+- Do not combine information from the context with your general training knowledge about Saudi regulations, Basel III, or any other regulatory framework.
+- Do not answer out-of-scope questions about weather, sports, general knowledge, company information, or topics unrelated to Saudi banking, cybersecurity, and data protection regulation."""
+
 
 OUT_OF_SCOPE_PATTERNS = [
     r"\bweather\b", r"\brecipe\b", r"\bsports\b", r"\bsong\b", r"\bmovie\b",
@@ -127,11 +189,8 @@ def _is_arabic(text: str) -> bool:
 
 def _is_nora_definition_query(query: str) -> bool:
     q = query.strip().lower()
-
     if not q:
         return False
-
-    # English path
     if "nora" in q:
         definition_markers = [
             "what is", "what's", "meaning of", "stand for",
@@ -139,13 +198,11 @@ def _is_nora_definition_query(query: str) -> bool:
         ]
         if q == "nora" or any(m in q for m in definition_markers):
             return True
-
-    # Arabic path (for users writing "نورا")
     if "نورا" in query:
         arabic_markers = ["ما هو", "ماهي", "ما معنى", "وفق", "حسب", "السعود"]
         return any(m in query for m in arabic_markers) or query.strip() == "نورا"
-
     return False
+
 
 QUERY_EXPANSIONS = {
     # ── English acronyms ──────────────────────────────────────────────────────
@@ -248,11 +305,7 @@ QUERY_EXPANSIONS = {
     "pdpl fine":                     "PDPL personal data protection law fines penalties violations Saudi Arabia",
     "data protection penalty":       "personal data protection law PDPL penalties violations fines Saudi Arabia SDAIA",
 
-    # ── Bank account — multi-word keys (NEW) ──────────────────────────────────
-    # Without these, a short query like "who cannot create a bank account" only
-    # fires the "retail" single-word expansion which drifts toward general
-    # account-opening procedures rather than restriction clauses.
-    # These multi-word keys anchor retrieval to SAMA EN 1644 specifically.
+    # ── Bank account multi-word keys ──────────────────────────────────────────
     "bank account opening":          "bank account opening rules requirements procedures eligibility SAMA EN 1644",
     "open bank account":             "bank account opening requirements procedures eligibility SAMA EN 1644",
     "bank account rules":            "bank account opening rules regulations SAMA EN 1644 requirements",
@@ -260,13 +313,7 @@ QUERY_EXPANSIONS = {
     "create bank account":           "bank account opening eligibility requirements restrictions SAMA EN 1644",
     "create a bank account":         "bank account opening eligibility requirements restrictions prohibited SAMA EN 1644",
 
-    # ── Restriction / negation queries (NEW) ──────────────────────────────────
-    # Fix for "who cannot / not allowed / prohibited" questions.
-    # The embedding model does not understand negation — "shall not open" and
-    # "shall open" produce nearly identical vectors because the surrounding
-    # regulatory language is identical. These expansions explicitly add
-    # "shall not / prohibited / restrictions" to the query vector so it points
-    # toward restriction clauses rather than procedure clauses.
+    # ── Restriction / negation queries ────────────────────────────────────────
     "cannot open bank account":      "bank account restrictions prohibited persons not eligible cannot open SAMA EN 1644 shall not",
     "not allowed bank account":      "bank account restrictions prohibited not permitted cannot open SAMA regulations shall not",
     "who cannot bank":               "bank account restrictions prohibited persons eligibility requirements SAMA EN 1644 shall not",
@@ -281,7 +328,7 @@ QUERY_EXPANSIONS = {
     "who is not allowed":            "restrictions prohibited not permitted not eligible SAMA regulations shall not",
     "not allowed to open":           "restrictions prohibited cannot open bank account SAMA EN 1644 shall not",
 
-    # ── Restriction queries — Arabic (NEW) ────────────────────────────────────
+    # ── Restriction queries — Arabic ──────────────────────────────────────────
     "من لا يمكنه فتح حساب":          "bank account restrictions prohibited persons cannot open SAMA EN 1644 shall not",
     "المحظورون من فتح حساب":          "bank account restrictions prohibited not permitted SAMA regulations shall not",
     "من لا يحق له فتح حساب":          "bank account restrictions prohibited persons not eligible SAMA EN 1644",
@@ -472,7 +519,6 @@ QUERY_EXPANSIONS = {
 }
 
 
-# [FIX] Case-insensitive substring match for long keys prevents silent misses
 def _expand_query(query: str) -> str:
     q = query.strip()
     expansions = []
@@ -791,8 +837,6 @@ def answer_query(
 
     query = user_query.strip()
 
-    # Option A: deterministic fallback for NORA definition questions.
-    # Keep this before retrieval so "What is NORA?" does not depend on DB coverage.
     if _is_nora_definition_query(query):
         if on_chunk:
             on_chunk(NORA_FALLBACK)
