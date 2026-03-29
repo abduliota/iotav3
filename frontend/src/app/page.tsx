@@ -36,14 +36,10 @@ export default function HomePage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Dark mode
-  useEffect(() => {
-    const saved = localStorage.getItem('nora_dark')
-    if (saved === 'true') setDark(true)
-  }, [])
+  // Dark mode — applies class but does NOT persist or load from storage
+  // Light mode is always the default on every page load
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
-    localStorage.setItem('nora_dark', String(dark))
   }, [dark])
 
   const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant')
@@ -163,7 +159,7 @@ export default function HomePage() {
             </svg>
           </button>
 
-          {/* Dark mode */}
+          {/* Dark mode toggle */}
           <button
             onClick={() => setDark(d => !d)}
             title="Toggle dark mode"
