@@ -9,6 +9,7 @@
 
   html {
     height: 100%;
+    text-size-adjust: 100%;
     -webkit-text-size-adjust: 100%;
   }
 
@@ -70,12 +71,14 @@
   /* Line clamp utilities */
   .line-clamp-2 {
     display: -webkit-box;
+    line-clamp: 2;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
   .line-clamp-3 {
     display: -webkit-box;
+    line-clamp: 3;
     -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;

@@ -7,6 +7,7 @@ interface Props {
   onSend:    (query: string) => void
   isLoading: boolean
   disabled?: boolean
+  showSuggestions?: boolean
 }
 
 const SUGGESTIONS = [
@@ -16,7 +17,7 @@ const SUGGESTIONS = [
   'PDPL data subject rights',
 ]
 
-export function InputBar({ onSend, isLoading, disabled }: Props) {
+export function InputBar({ onSend, isLoading, disabled, showSuggestions = true }: Props) {
   const [value, setVal] = useState('')
   const textRef = useRef<HTMLTextAreaElement>(null)
 
@@ -46,13 +47,13 @@ export function InputBar({ onSend, isLoading, disabled }: Props) {
   return (
     <div className="space-y-3">
       {/* Suggestion chips — shown when empty */}
-      {!value && !isLoading && (
-        <div className="flex gap-2 flex-wrap px-1">
+      {showSuggestions && !value && !isLoading && (
+        <div className="flex gap-1.5 overflow-x-auto sm:overflow-visible sm:flex-wrap px-1 pb-1">
           {SUGGESTIONS.map(s => (
             <button
               key={s}
               onClick={() => { setVal(s); textRef.current?.focus() }}
-              className="text-[11px] px-3 py-1.5 rounded-full border border-border dark:border-border-dark text-ink-muted dark:text-zinc-400 hover:border-accent/50 hover:text-accent dark:hover:text-accent-light hover:bg-accent-muted/30 transition-all duration-150 whitespace-nowrap"
+              className="shrink-0 text-[10px] sm:text-[11px] px-2.5 sm:px-3 py-1.5 rounded-full border border-border dark:border-border-dark text-ink-muted dark:text-zinc-400 hover:border-accent/50 hover:text-accent dark:hover:text-accent-light hover:bg-accent-muted/30 transition-all duration-150 whitespace-nowrap max-w-[70vw] sm:max-w-none truncate"
             >
               {s}
             </button>
