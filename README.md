@@ -10,7 +10,7 @@ FastAPI + Next.js RAG chatbot for Saudi regulatory and compliance Q&A (SAMA/NORA
 - Source metadata in answers (`document_name`, pages, similarity, snippet)
 - Session persistence and message history via Supabase tables
 - Feedback capture (like/dislike) for responses
-- Redis cache support with in-memory fallback
+- Redis cache support with in-memory fallback 
 - Next.js frontend with fingerprint-based anonymous identity/session continuity
 
 ## Tech Stack
