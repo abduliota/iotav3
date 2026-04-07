@@ -59,7 +59,7 @@ from dotenv import load_dotenv
 load_dotenv()
 _judge_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
-QUESTIONS = [
+QUESTIONS_LEGACY = [
     # ── Core SAMA knowledge ───────────────────────────────────────────────────
     ("What is SAMA?",                                                               "regulatory"),
     ("What is NORA?",                                                               "regulatory"),
@@ -379,6 +379,96 @@ QUESTIONS = [
     ("ما متطلبات التسجيل والمراقبة المفروضة بموجب ضوابط OTCC-1:2022؟",            "arabic"),
 ]
 
+QUESTIONS_NEW = [
+    # 1) Regulatory & Policy Understanding
+    ("What are the key account opening regulations issued by Saudi Central Bank?", "regulatory"),
+    ("What KYC requirements apply to individuals vs corporates in KSA?", "regulatory"),
+    ("How does Absher integration support identity verification?", "regulatory"),
+    ("What are the AML obligations under Saudi regulations?", "regulatory"),
+    ("How does Saudi Data and AI Authority impact data privacy in onboarding?", "regulatory"),
+
+    # 2) Customer Identification & Verification (KYC)
+    ("What documents are required for Saudi nationals?", "regulatory"),
+    ("What documents are required for GCC nationals?", "regulatory"),
+    ("What documents are required for expats (Iqama holders)?", "regulatory"),
+    ("How should the system validate an Iqama status and expiry?", "regulatory"),
+    ("Can accounts be opened with expired IDs under any exception scenario?", "regulatory"),
+    ("What biometric verification methods are allowed in KSA?", "regulatory"),
+    ("How do you verify ultimate beneficial owners (UBOs) for corporate accounts?", "regulatory"),
+
+    # 3) Customer Types & Segmentation
+    ("What are the onboarding requirements for individuals?", "regulatory"),
+    ("What are the onboarding requirements for SMEs?", "regulatory"),
+    ("What are the onboarding requirements for large corporates?", "regulatory"),
+    ("What are the onboarding requirements for non-residents?", "regulatory"),
+    ("Can a non-resident open a bank account in KSA? Under what conditions?", "regulatory"),
+    ("What additional checks apply to high-risk customers or PEPs (Politically Exposed Persons)?", "regulatory"),
+
+    # 4) AML / CFT Compliance
+    ("What AML screening is required during onboarding?", "regulatory"),
+    ("How should sanctions screening be performed?", "regulatory"),
+    ("What lists must be checked (local + international)?", "regulatory"),
+    ("What is the process if a customer is flagged as a PEP?", "regulatory"),
+    ("What are the requirements for ongoing due diligence after account opening?", "regulatory"),
+
+    # 5) Workflow & Decision Logic
+    ("What is the step-by-step workflow for account opening?", "regulatory"),
+    ("What triggers a manual review vs straight-through processing (STP)?", "regulatory"),
+    ("What are the rejection criteria for account opening?", "regulatory"),
+    ("How are incomplete applications handled?", "regulatory"),
+    ("What audit logs must be maintained?", "regulatory"),
+
+    # 6) Documentation & Data Requirements
+    ("What minimum data fields are mandatory for account creation?", "regulatory"),
+    ("How long should customer records be retained under KSA law?", "regulatory"),
+    ("What are the acceptable formats for document submission (digital vs physical)?", "regulatory"),
+    ("Can digital signatures be used? Under which regulations?", "regulatory"),
+
+    # 7) Digital Onboarding & eKYC
+    ("What are the regulatory requirements for remote onboarding?", "regulatory"),
+    ("How does integration with national platforms like Absher or Yaqeen work?", "regulatory"),
+    ("What fraud checks are required during digital onboarding?", "regulatory"),
+    ("What are the limits for fully digital account opening?", "regulatory"),
+
+    # 8) Exceptions & Edge Cases
+    ("What happens if customer name mismatch occurs across documents?", "regulatory"),
+    ("What happens if national ID is under renewal during onboarding?", "regulatory"),
+    ("What happens if the customer is a minor?", "regulatory"),
+    ("Can joint accounts be opened digitally?", "regulatory"),
+    ("How are accounts handled for legally incapacitated individuals?", "regulatory"),
+
+    # 9) Corporate Account Opening
+    ("What documents are required for corporate onboarding?", "regulatory"),
+    ("How do you validate Commercial Registration (CR)?", "regulatory"),
+    ("How do you validate Articles of Association?", "regulatory"),
+    ("How do you identify and verify UBOs in corporate onboarding?", "regulatory"),
+    ("What approvals are required for signatories?", "regulatory"),
+
+    # 10) Compliance Monitoring & Reporting
+    ("What reports must be submitted to Saudi Central Bank?", "regulatory"),
+    ("How are suspicious activities reported (SAR)?", "regulatory"),
+    ("What are the penalties for non-compliance?", "regulatory"),
+
+    # 11) AI/RegTech Capability Validation
+    ("Can the agent explain regulatory rules in plain language?", "regulatory"),
+    ("Can it dynamically adapt rules based on updated regulations?", "regulatory"),
+    ("Can it provide audit trails for decisions made?", "regulatory"),
+    ("Does it support multilingual queries (Arabic/English)?", "regulatory"),
+    ("Can it simulate decision outcomes based on input scenarios?", "regulatory"),
+
+    # 12) Scenario-Based Testing
+    ("A UAE resident with no Iqama wants to open an account—what happens?", "scenario"),
+    ("An SME with incomplete UBO data submits an application—what is the decision?", "scenario"),
+    ("A PEP customer passes KYC but fails enhanced due diligence—what next?", "scenario"),
+    ("Customer onboarding via mobile app fails biometric verification—what is fallback?", "scenario"),
+]
+
+QUESTION_SET = os.getenv("QUESTION_SET", "new").strip().lower()
+if QUESTION_SET not in {"new", "legacy"}:
+    QUESTION_SET = "new"
+
+QUESTIONS = QUESTIONS_NEW if QUESTION_SET == "new" else QUESTIONS_LEGACY
+
 DIVIDER     = "═" * 80
 SUB_DIVIDER = "─" * 80
 
@@ -391,23 +481,7 @@ METHOD_LABELS = {
     "unknown":      "UNKNOWN",
 }
 
-EXPECTED = {
-    0:  "correct",       # What is SAMA?
-    1:  "correct",       # What is NORA?
-    2:  "correct",       # Capital adequacy
-    3:  "correct",       # Who cannot open account
-    4:  "correct",       # AML requirements
-    5:  "correct",       # KYC requirements
-    6:  "correct",       # Rules for opening accounts
-    7:  "correct",       # Minimum capital for license
-    8:  "trick",         # King Abdullah — should say not found
-    9:  "correct",       # KYC (cached)
-    10: "out_of_scope",  # Weather
-    11: "out_of_scope",  # CEO of Apple
-    12: "correct",       # Arabic central bank
-    13: "not_found",     # Arabic capital requirements
-    **{i: "correct" for i in range(14, 300)},
-}
+EXPECTED = {i: "correct" for i in range(len(QUESTIONS))}
 
 NOT_FOUND_PHRASES = [
     "does not contain", "cannot find", "not found in",
