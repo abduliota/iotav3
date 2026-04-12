@@ -6,11 +6,15 @@ Endpoints:
   POST /api/query-stream        — structured NDJSON streaming
   POST /api/feedback            — save like/dislike feedback
   GET  /api/session/{id}/messages — fetch past messages for a session
-  GET  /api/conversations       — list all sessions for a user (NEW)
-  GET  /api/documents           — list ingested documents (NEW)
-  GET  /admin/stats             — system metrics (NEW)
+  GET  /api/conversations       — list all sessions for a user
+  GET  /api/documents           — list ingested documents
+  GET  /admin/stats             — system metrics
   GET  /admin/cache/status
   POST /admin/cache/clear
+
+Changes in this version:
+  - [FIX] Streaming endpoint now clears sources when LLM returns not-found answer
+    so the sources panel stays empty instead of showing irrelevant documents.
 """
 
 from __future__ import annotations
@@ -59,7 +63,7 @@ def get_sb():
     return _sb
 
 # ── App setup ─────────────────────────────────────────────────────────────────
-app = FastAPI(title="SAMA NORA Chatbot", version="3.2.0")
+app = FastAPI(title="SAMA NORA Chatbot", version="3.2.1")
 
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000")
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -109,6 +113,17 @@ class FeedbackRequest(BaseModel):
     comments:          str | None = None
     user_message:      str | None = None
     assistant_message: str | None = None
+
+
+# ── Helper: detect not-found answers ─────────────────────────────────────────
+
+def _answer_is_not_found(answer: str) -> bool:
+    """Return True if the LLM answered that no information was found."""
+    a = answer.lower()
+    return any(p in a for p in [
+        "does not contain", "cannot find", "not found in",
+        "لا تتوفر", "لم أجد",
+    ])
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -293,7 +308,7 @@ def _get_session_summary(session_id: str) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "3.2.0"}
+    return {"status": "ok", "version": "3.2.1"}
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -364,9 +379,18 @@ def query_stream_endpoint(req: QueryRequest):
                 token = word + (" " if i < len(words) - 1 else "")
                 yield json.dumps({"type": "token", "text": token}) + "\n"
 
-            # Send sources + metadata
+            # ── FIX: Don't send sources if answer is not found (Problem 2) ───
+            # This prevents the sources panel from showing irrelevant documents
+            # when the LLM couldn't find an answer in the retrieved chunks.
+            if _answer_is_not_found(answer):
+                sources_to_send = []
+                log.info(f"[stream] not-found answer — clearing sources for clean UX")
+            else:
+                sources_to_send = result.get("sources", [])
+            # ─────────────────────────────────────────────────────────────────
+
             sources_payload = []
-            for s in result.get("sources", []):
+            for s in sources_to_send:
                 sources_payload.append({
                     "document_name": s.get("document_name", ""),
                     "page_start":    s.get("page_start"),
@@ -447,8 +471,6 @@ def get_session_messages(session_id: str, limit: int = 20):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── NEW: Conversations list ───────────────────────────────────────────────────
-
 @app.get("/api/conversations")
 def list_conversations(user_id: str = "", limit: int = 50):
     """Return all sessions for a user, sorted newest first, with title = first message."""
@@ -465,7 +487,6 @@ def list_conversations(user_id: str = "", limit: int = 50):
         )
         rows = resp.data or []
 
-        # First message per session = title, track last timestamp + count
         seen: dict = {}
         for row in rows:
             sid = row["session_id"]
@@ -492,18 +513,13 @@ def list_conversations(user_id: str = "", limit: int = 50):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── NEW: Documents list ───────────────────────────────────────────────────────
-
 @app.get("/api/documents")
 def list_documents(search: str = "", limit: int = 20):
     """
     Return all documents from the documents table as the source of truth,
     with chunk counts joined from sama_nora_chunks.
-    Documents with 0 chunks are included (shown as 0 chunks).
-    Sorted by chunk_count DESC so most useful docs appear first.
     """
     try:
-        # Primary source: documents table — all registered documents
         doc_resp = (
             get_sb()
             .table("documents")
@@ -512,7 +528,6 @@ def list_documents(search: str = "", limit: int = 20):
         )
         all_docs = doc_resp.data or []
 
-        # Secondary: chunk counts from sama_nora_chunks
         chunks_resp = (
             get_sb()
             .table("sama_nora_chunks")
@@ -521,24 +536,19 @@ def list_documents(search: str = "", limit: int = 20):
         )
         chunk_counts = Counter(r["document_name"] for r in (chunks_resp.data or []))
 
-        # Deduplicate documents by name (documents table can have duplicates
-        # from bad scrape runs) — keep the one with a real source_type if available
         seen: dict[str, dict] = {}
         for doc in all_docs:
             name = doc.get("document_name", "").strip()
             if not name:
                 continue
-            # Skip obviously bad entries (pure UUIDs, very short names)
             if len(name) < 4:
                 continue
             if name not in seen:
                 seen[name] = doc
             else:
-                # Prefer the row that has a real source_type over NULL
                 if seen[name].get("source_type") is None and doc.get("source_type"):
                     seen[name] = doc
 
-        # Build results list
         results = []
         for name, doc in seen.items():
             if search and search.lower() not in name.lower():
@@ -550,7 +560,6 @@ def list_documents(search: str = "", limit: int = 20):
                 "chunk_count":   chunk_counts.get(name, 0),
             })
 
-        # Sort by chunk count descending — most useful documents first
         results.sort(key=lambda x: x["chunk_count"], reverse=True)
 
         return {"documents": results[:limit], "total": len(results)}
@@ -559,12 +568,9 @@ def list_documents(search: str = "", limit: int = 20):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── NEW: System stats ─────────────────────────────────────────────────────────
-
 @app.get("/admin/stats")
 def admin_stats():
     """Return system metrics for the dashboard info card."""
-    # Docs count
     docs_count = 0
     try:
         d = get_sb().table("documents").select("id", count="exact").execute()
@@ -572,7 +578,6 @@ def admin_stats():
     except Exception as e:
         log.warning(f"[stats] docs count failed: {e}")
 
-    # Chunks count
     chunks_count = 0
     try:
         c = get_sb().table("sama_nora_chunks").select("id", count="exact").execute()
@@ -580,7 +585,6 @@ def admin_stats():
     except Exception as e:
         log.warning(f"[stats] chunks count failed: {e}")
 
-    # Redis cached answers
     cached_answers = 0
     try:
         redis_url = os.getenv("REDIS_URL", "")
@@ -594,12 +598,10 @@ def admin_stats():
     except Exception:
         pass
 
-    # Cache hit rate
     hit_rate = 0.0
     if _cache_total > 0:
         hit_rate = round(_cache_hits / _cache_total * 100, 1)
 
-    # Avg response time
     avg_ms = 0
     if _request_times:
         avg_ms = round(sum(_request_times) / len(_request_times))
@@ -614,8 +616,6 @@ def admin_stats():
         "model":              os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
     }
 
-
-# ── Existing cache admin endpoints ────────────────────────────────────────────
 
 @app.get("/admin/cache/status")
 def cache_status():

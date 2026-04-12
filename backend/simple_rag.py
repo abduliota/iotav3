@@ -17,12 +17,13 @@ Improvements in this version:
   - [FIX] Added bank account multi-word expansion keys to anchor short queries to SAMA EN 1644
   - [FIX] Added NORA definition fallback for "What is NORA?"-style queries
   - [IMPROVEMENT] SYSTEM_PROMPT expanded to 1,024+ tokens for OpenAI prompt caching
-    (saves up to 90% on input token cost, up to 80% latency reduction on repeated calls)
-  - [IMPROVEMENT] Domain glossary added to SYSTEM_PROMPT (SAMA, NCA, PDPL, ECC, CAR, LCR etc.)
+  - [IMPROVEMENT] Domain glossary added to SYSTEM_PROMPT
   - [IMPROVEMENT] Explicit citation examples (CORRECT vs WRONG) to reduce PARTIAL rate
-  - [IMPROVEMENT] Conflict-handling rule: cite both sources when passages appear to conflict
-  - [IMPROVEMENT] Numeric precision rule: quote exact figures, never round or substitute
+  - [IMPROVEMENT] Conflict-handling rule
+  - [IMPROVEMENT] Numeric precision rule
   - [IMPROVEMENT] Arabic citation format added to SYSTEM_PROMPT
+  - [FIX v4] Added PEP/KYC/onboarding/UBO/sanctions query expansions
+  - [FIX v4] Clear sources when LLM returns not-found answer (Problem 2 fix)
 """
 
 from __future__ import annotations
@@ -93,22 +94,6 @@ def _strip_trailing_not_found(answer: str) -> str:
 
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
-# Expanded to 1,024+ tokens so OpenAI automatically caches it across requests.
-# OpenAI prompt caching activates when the prompt prefix exceeds 1,024 tokens
-# and is repeated across requests — no code changes required, savings are automatic.
-# Expected impact: up to 90% cost reduction on input tokens, up to 80% lower latency.
-#
-# Content added vs previous version:
-#   - Full domain glossary (SAMA, NCA, PDPL, ECC, CCC, CAR, LCR, NSFR, HQLA etc.)
-#   - Explicit citation examples showing CORRECT vs WRONG format
-#   - Conflict-handling rule for when two passages appear to disagree
-#   - Numeric precision rule: quote exact figures, never round or substitute
-#   - Arabic citation format explicitly shown
-#   - Broader scope declaration (cybersecurity + data protection, not just banking)
-#
-# All content is fixed — it never changes per query, which is the requirement
-# for OpenAI prompt caching to activate consistently.
-# ─────────────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a strict regulatory assistant for Saudi Arabian banking, cybersecurity, and data protection regulations. You serve compliance officers, auditors, and regulatory professionals working within the Kingdom of Saudi Arabia.
 
 Answer using ONLY the text explicitly provided in <context>. Every sentence you write must be directly traceable to a specific passage in the context. If a fact is not in the context, it does not exist for the purpose of this answer.
@@ -132,6 +117,11 @@ HQLA   = High Quality Liquid Assets — assets eligible for LCR numerator.
 KYC    = Know Your Customer — customer identification and due diligence process.
 AML    = Anti-Money Laundering — controls to detect and prevent money laundering.
 CFT    = Countering the Financing of Terrorism.
+PEP    = Politically Exposed Person — high-risk customer requiring enhanced due diligence.
+EDD    = Enhanced Due Diligence — additional checks applied to high-risk customers including PEPs.
+UBO    = Ultimate Beneficial Owner — natural person who ultimately owns or controls a legal entity.
+SAR    = Suspicious Activity Report — report filed with SAFIU for suspicious transactions.
+SAFIU  = Saudi Arabia Financial Intelligence Unit — receives SAR reports.
 ICAAP  = Internal Capital Adequacy Assessment Process — banks' own capital planning process.
 GRC    = Governance, Risk, and Compliance — framework covering risk management and regulatory compliance.
 SACS   = Saudi Aramco Cybersecurity Standard — e.g. SACS-002 for third-party cybersecurity.
@@ -219,10 +209,60 @@ QUERY_EXPANSIONS = {
     "car":    "capital adequacy ratio",
     "rwa":    "risk weighted assets",
     "cdd":    "customer due diligence know your customer",
-    "edd":    "enhanced due diligence high risk customers",
+    "edd":    "enhanced due diligence high risk customers PEP politically exposed",
     "hqla":   "high quality liquid assets liquidity coverage ratio",
     "ltv":    "loan to value ratio risk weight residential real estate",
     "retail": "retail customers individual natural persons resident bank account",
+    "ubo":    "ultimate beneficial owner UBO corporate onboarding verification SAMA EN 1704",
+    "sar":    "suspicious activity report SAR financial intelligence unit SAFIU SAMA AML",
+    "pep":    "politically exposed person enhanced due diligence EDD SAMA EN 1704 high risk customer AML",
+
+    # ── PEP / KYC / Onboarding (English) — NEW ────────────────────────────────
+    "politically exposed":              "PEP enhanced due diligence senior management approval source of wealth SAMA EN 1704",
+    "enhanced due diligence":           "EDD PEP high risk customer enhanced measures SAMA EN 1704 AML CTF",
+    "fails enhanced due diligence":     "PEP failed EDD terminate relationship suspicious activity SAMA EN 1704 AML",
+    "pep customer":                     "politically exposed person enhanced due diligence SAMA EN 1704 AML high risk",
+    "pep fails":                        "PEP failed enhanced due diligence terminate relationship SAMA EN 1704",
+    "kyc requirements":                 "know your customer KYC individuals corporates identity verification SAMA EN 1644 SAMA EN 1704",
+    "kyc individuals":                  "individual natural persons KYC requirements SAMA EN 1644 identity documents",
+    "kyc corporates":                   "corporate juristic persons KYC UBO beneficial owner SAMA EN 1704 1644",
+    "beneficial owner":                 "beneficial owner UBO verification identification SAMA EN 1704 AML corporate",
+    "verify ubo":                       "ultimate beneficial owner UBO verification corporate onboarding SAMA EN 1704",
+    "ultimate beneficial owner":        "UBO ultimate beneficial owner corporate verification SAMA EN 1704 AML ownership",
+    "sanctions screening":              "sanctions list screening UN OFAC PCCML SAMA EN 1704 AML CTF prohibited",
+    "sanctions list":                   "sanctions lists UN Security Council OFAC FATF screening SAMA EN 1704 1428",
+    "suspicious activity":              "suspicious activity report SAR SAFIU reporting AML CTF SAMA EN 1704",
+    "account opening workflow":         "bank account opening step by step workflow SAMA EN 1644 procedures requirements",
+    "step by step":                     "bank account opening workflow procedures steps SAMA EN 1644",
+    "manual review":                    "manual review compliance approval bank account high risk SAMA EN 1644",
+    "straight through processing":      "STP automatic processing bank account opening low risk SAMA EN 1644",
+    "remote onboarding":                "remote account opening digital online SAMA EN 1644 verification identity",
+    "digital onboarding":               "digital remote account opening SAMA EN 1644 SAMA EN 2888 mobile app",
+    "digital account opening limits":   "digital account opening limits SAMA EN 1644 mobile online banking",
+    "biometric verification":           "biometric identity verification NafathID Absher national single sign on SAMA",
+    "absher":                           "Absher national single sign on portal identity verification SAMA digital onboarding",
+    "yaqeen":                           "Yaqeen identity verification national portal SAMA onboarding KYC",
+    "digital signature":                "electronic signature digital Electronic Transactions Law Saudi Arabia",
+    "expired id":                       "expired identification documents bank account exception renewal SAMA EN 1644",
+    "id under renewal":                 "national ID under renewal exception bank account SAMA EN 1644 180 days",
+    "minor customer":                   "minor underage customer bank account guardian SAMA EN 1644 15 18 hijri years",
+    "joint account":                    "joint bank account opening digital online SAMA EN 1644",
+    "corporate onboarding":             "corporate juristic person onboarding documents commercial register SAMA EN 1644",
+    "commercial registration":          "commercial register CR validation verification SAMA EN 1644 Ministry of Commerce",
+    "articles of association":          "articles of association memorandum validation corporate onboarding SAMA EN 1644",
+    "signatory approval":               "authorized signatory approval corporate bank account SAMA EN 1644",
+    "incomplete application":           "incomplete bank account application missing documents SAMA EN 1644 requirements",
+    "name mismatch":                    "customer name mismatch documents identity verification SAMA EN 1644",
+    "document submission":              "document submission formats digital physical bank account SAMA EN 1644",
+    "non-resident onboarding":          "non-resident bank account opening conditions SAMA EN 1644 Ministry of Interior",
+    "large corporate":                  "large corporate onboarding requirements SAMA EN 1644 juristic persons documents",
+    "sme onboarding":                   "SME small medium enterprise onboarding requirements SAMA EN 1644 commercial register",
+    "biometric fallback":               "biometric verification failure fallback OTP SMS alternative SAMA EN 2888",
+    "mobile app onboarding":            "mobile app onboarding digital account SAMA EN 2888 1644 OTP verification",
+    "ongoing due diligence":            "ongoing due diligence CDD periodic review customer information SAMA EN 1704 1644",
+    "rejection criteria":               "account opening rejection criteria requirements SAMA EN 1644 compliance",
+    "what lists must be checked":       "sanctions lists screening UN OFAC FATF PCCML SAMA AML CTF prohibited",
+    "lists checked":                    "sanctions screening lists UN Security Council OFAC FATF SAMA EN 1704",
 
     # ── English technical expansions ──────────────────────────────────────────
     "cap on cash inflows":    "75% cap total cash inflows outflows LCR Basel III liquidity",
@@ -516,6 +556,34 @@ QUERY_EXPANSIONS = {
     "دعم الامتثال المُدار":    "ongoing managed compliance support GRC continuous monitoring services",
     "التدقيق الداخلي والاستعداد": "internal audit certification readiness GRC ISO compliance preparation",
     "شهادات GRC":              "GRC certification readiness internal audit ISO 27001 compliance",
+
+    # ── Arabic → English bridges: PEP / KYC / Onboarding — NEW ──────────────
+    "الشخص المعرض سياسياً":    "PEP politically exposed person enhanced due diligence SAMA EN 1704 AML high risk",
+    "العناية المشددة":          "enhanced due diligence EDD PEP high risk customer SAMA EN 1704 AML CTF",
+    "العناية الواجبة المعززة":  "enhanced due diligence EDD PEP politically exposed person SAMA EN 1704",
+    "فشل العناية الواجبة":      "failed enhanced due diligence EDD PEP terminate relationship SAMA EN 1704",
+    "متطلبات العناية الواجبة":  "customer due diligence CDD KYC requirements SAMA EN 1704 1644 AML",
+    "المالك المستفيد الفعلي":   "ultimate beneficial owner UBO verification corporate SAMA EN 1704 AML",
+    "الشخص المعرض للمخاطر":    "PEP politically exposed person enhanced due diligence SAMA EN 1704",
+    "قوائم العقوبات":           "sanctions lists screening UN OFAC FATF PCCML SAMA EN 1704 AML prohibited",
+    "فحص العقوبات":             "sanctions screening lists UN OFAC FATF PCCML SAMA EN 1704 AML",
+    "تقرير الاشتباه":           "suspicious activity report SAR SAFIU SAMA EN 1704 AML CTF reporting",
+    "سير العمل لفتح الحساب":    "bank account opening workflow step by step SAMA EN 1644 procedures",
+    "المراجعة اليدوية":         "manual review compliance approval bank account high risk SAMA EN 1644",
+    "التحقق من الهوية البيومترية": "biometric identity verification Absher NafathID SAMA digital onboarding",
+    "التوقيع الرقمي":           "electronic digital signature Electronic Transactions Law Saudi Arabia",
+    "بطاقة الهوية منتهية الصلاحية": "expired ID documents bank account exception renewal SAMA EN 1644 180 days",
+    "هوية تحت التجديد":         "national ID under renewal exception bank account SAMA EN 1644 180 days",
+    "عميل قاصر":               "minor customer bank account guardian SAMA EN 1644 15 18 hijri years",
+    "حساب مشترك":              "joint bank account opening SAMA EN 1644 digital",
+    "تأهيل الشركات":            "corporate onboarding requirements documents commercial register SAMA EN 1644",
+    "السجل التجاري":            "commercial register CR validation verification SAMA EN 1644 Ministry of Commerce",
+    "عقد التأسيس":              "articles of association memorandum validation corporate onboarding SAMA EN 1644",
+    "طلب غير مكتمل":            "incomplete application missing documents bank account SAMA EN 1644 requirements",
+    "تعارض الأسماء":            "name mismatch customer documents identity verification SAMA EN 1644",
+    "التأهيل عن بُعد":          "remote onboarding digital account opening SAMA EN 1644 SAMA EN 2888",
+    "حدود فتح الحساب الرقمي":   "digital account opening limits SAMA EN 1644 mobile online banking",
+    "فشل التحقق البيومتري":     "biometric verification failure fallback OTP SMS alternative SAMA EN 2888",
 }
 
 
@@ -885,6 +953,19 @@ def answer_query(
 
     answer = _generate(build_context(chunks), query, on_chunk, session_summary=session_summary)
     answer = _strip_trailing_not_found(answer)
+
+    # ── FIX: If LLM says not found, return empty sources (Problem 2 fix) ──────
+    if _is_not_found_answer(answer):
+        if debug: print(f"[pipeline] LLM returned not-found — clearing sources for clean UX")
+        return {
+            "answer": answer,
+            "sources": [],
+            "cached": False,
+            "method": "generative",
+            "candidate_count": len(candidates),
+            "reranker_top_score": reranker_top_score,
+        }
+    # ─────────────────────────────────────────────────────────────────────────
 
     seen: set[tuple] = set()
     sources = []
