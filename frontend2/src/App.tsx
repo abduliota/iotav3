@@ -216,9 +216,8 @@ function App() {
       setDocuments(data);
     } catch (err) {
       console.warn("Failed to load documents", err);
-      setDocumentsError(
-        err instanceof Error ? err.message : "Failed to load documents"
-      );
+      // FIX 2: Show friendly message instead of raw exception string
+      setDocumentsError("Unable to load documents. Retrying shortly.");
     } finally {
       setDocumentsLoading(false);
     }
@@ -279,12 +278,14 @@ function App() {
     loadSystemStats();
   }, [loadConversations, loadDocuments, loadSystemStats]);
 
+  // FIX 1: Changed polling interval from 30s (30000) to 5 minutes (300000)
+  // to reduce Supabase connection pressure and prevent ConnectionTerminated errors
   useEffect(() => {
     const id = window.setInterval(() => {
       loadDocuments();
       loadConversations();
       loadSystemStats();
-    }, 30000);
+    }, 300000);
     return () => window.clearInterval(id);
   }, [loadConversations, loadDocuments, loadSystemStats]);
 
@@ -645,9 +646,10 @@ function App() {
                 </button>
               )}
             </div>
+            {/* FIX 2: Show friendly message instead of raw ConnectionTerminated exception */}
             {documentsError && (
               <div className="status status-error compact-status">
-                {documentsError}
+                Unable to load documents. Retrying shortly.
               </div>
             )}
             {documentsLoading ? (

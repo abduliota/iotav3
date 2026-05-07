@@ -13,8 +13,10 @@ Endpoints:
   POST /admin/cache/clear
 
 Changes in this version:
-  - [FIX] Streaming endpoint now clears sources when LLM returns not-found answer
-    so the sources panel stays empty instead of showing irrelevant documents.
+  - [FIX] Streaming endpoint clears sources when LLM returns not-found answer.
+  - [FIX] Added _sb_with_retry() wrapper to handle Supabase ConnectionTerminated
+    errors by recreating the client and retrying once automatically.
+  - [FIX] list_documents, list_conversations, get_session_messages now use retry wrapper.
 """
 
 from __future__ import annotations
@@ -62,8 +64,27 @@ def get_sb():
         )
     return _sb
 
+
+def _sb_with_retry(fn):
+    """
+    FIX 3: Retry a Supabase call once with a fresh client if a
+    ConnectionTerminated error is encountered (HTTP/2 error_code:1 or error_code:9).
+    This handles stale connections being reused after Azure/Supabase drops them.
+    """
+    global _sb
+    try:
+        return fn(get_sb())
+    except Exception as e:
+        err_str = str(e)
+        if "ConnectionTerminated" in err_str or "error_code:" in err_str:
+            log.warning(f"[db] ConnectionTerminated detected — recreating client and retrying: {e}")
+            _sb = None  # force fresh client on next get_sb() call
+            return fn(get_sb())
+        raise
+
+
 # ── App setup ─────────────────────────────────────────────────────────────────
-app = FastAPI(title="SAMA NORA Chatbot", version="3.2.1")
+app = FastAPI(title="SAMA NORA Chatbot", version="3.2.2")
 
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000")
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -130,20 +151,24 @@ def _answer_is_not_found(answer: str) -> bool:
 
 def _ensure_user(user_id: str) -> None:
     try:
-        get_sb().table("user").upsert(
-            {"user_id": user_id},
-            on_conflict="user_id",
-        ).execute()
+        _sb_with_retry(
+            lambda sb: sb.table("user").upsert(
+                {"user_id": user_id},
+                on_conflict="user_id",
+            ).execute()
+        )
     except Exception as e:
         log.error(f"[db] ensure_user FAILED for {user_id[:12]}: {e}")
 
 
 def _ensure_session(session_id: str, user_id: str) -> None:
     try:
-        get_sb().table("session").upsert(
-            {"session_id": session_id, "user_id": user_id},
-            on_conflict="session_id",
-        ).execute()
+        _sb_with_retry(
+            lambda sb: sb.table("session").upsert(
+                {"session_id": session_id, "user_id": user_id},
+                on_conflict="session_id",
+            ).execute()
+        )
     except Exception as e:
         log.error(f"[db] ensure_session FAILED for {session_id[:12]}: {e}")
 
@@ -156,13 +181,15 @@ def _save_message(
     assistant_message: str,
 ) -> None:
     try:
-        get_sb().table("session_messages").insert({
-            "message_id":        message_id,
-            "session_id":        session_id,
-            "user_id":           user_id,
-            "user_message":      user_message,
-            "assistant_message": assistant_message,
-        }).execute()
+        _sb_with_retry(
+            lambda sb: sb.table("session_messages").insert({
+                "message_id":        message_id,
+                "session_id":        session_id,
+                "user_id":           user_id,
+                "user_message":      user_message,
+                "assistant_message": assistant_message,
+            }).execute()
+        )
     except Exception as e:
         log.error(f"[db] save_message FAILED for {message_id[:12]}: {e}")
 
@@ -188,9 +215,8 @@ SUMMARY_EVERY_N = 6
 
 def _get_message_count(session_id: str) -> int:
     try:
-        resp = (
-            get_sb()
-            .table("session_messages")
+        resp = _sb_with_retry(
+            lambda sb: sb.table("session_messages")
             .select("message_id", count="exact")
             .eq("session_id", session_id)
             .execute()
@@ -203,9 +229,8 @@ def _get_message_count(session_id: str) -> int:
 
 def _fetch_last_n_messages(session_id: str, n: int = 6) -> list[dict]:
     try:
-        resp = (
-            get_sb()
-            .table("session_messages")
+        resp = _sb_with_retry(
+            lambda sb: sb.table("session_messages")
             .select("user_message, assistant_message")
             .eq("session_id", session_id)
             .order("timestamp", desc=True)
@@ -246,13 +271,15 @@ def _generate_summary(messages: list[dict], existing_summary: str = "") -> str:
 
 def _upsert_summary(session_id: str, user_id: str, summary: str, count: int) -> None:
     try:
-        get_sb().table("session_summary").upsert({
-            "session_id":    session_id,
-            "user_id":       user_id,
-            "summary_text":  summary,
-            "summary_json":  "{}",
-            "message_count": count,
-        }, on_conflict="session_id").execute()
+        _sb_with_retry(
+            lambda sb: sb.table("session_summary").upsert({
+                "session_id":    session_id,
+                "user_id":       user_id,
+                "summary_text":  summary,
+                "summary_json":  "{}",
+                "message_count": count,
+            }, on_conflict="session_id").execute()
+        )
     except Exception as e:
         log.error(f"[summary] upsert failed: {e}")
 
@@ -264,9 +291,8 @@ def _maybe_update_summary(session_id: str, user_id: str) -> None:
             return
         existing = ""
         try:
-            ex = (
-                get_sb()
-                .table("session_summary")
+            ex = _sb_with_retry(
+                lambda sb: sb.table("session_summary")
                 .select("summary_text")
                 .eq("session_id", session_id)
                 .limit(1)
@@ -289,9 +315,8 @@ def _get_session_summary(session_id: str) -> str:
     if not session_id:
         return ""
     try:
-        resp = (
-            get_sb()
-            .table("session_summary")
+        resp = _sb_with_retry(
+            lambda sb: sb.table("session_summary")
             .select("summary_text")
             .eq("session_id", session_id)
             .limit(1)
@@ -308,7 +333,7 @@ def _get_session_summary(session_id: str) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "3.2.1"}
+    return {"status": "ok", "version": "3.2.2"}
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -379,15 +404,12 @@ def query_stream_endpoint(req: QueryRequest):
                 token = word + (" " if i < len(words) - 1 else "")
                 yield json.dumps({"type": "token", "text": token}) + "\n"
 
-            # ── FIX: Don't send sources if answer is not found (Problem 2) ───
-            # This prevents the sources panel from showing irrelevant documents
-            # when the LLM couldn't find an answer in the retrieved chunks.
+            # Don't send sources if answer is not found
             if _answer_is_not_found(answer):
                 sources_to_send = []
                 log.info(f"[stream] not-found answer — clearing sources for clean UX")
             else:
                 sources_to_send = result.get("sources", [])
-            # ─────────────────────────────────────────────────────────────────
 
             sources_payload = []
             for s in sources_to_send:
@@ -446,7 +468,9 @@ def feedback_endpoint(req: FeedbackRequest):
         if req.user_message      is not None: payload["user_message"]      = req.user_message
         if req.assistant_message is not None: payload["assistant_message"] = req.assistant_message
 
-        get_sb().table("session_feedback").insert(payload).execute()
+        _sb_with_retry(
+            lambda sb: sb.table("session_feedback").insert(payload).execute()
+        )
         return {"status": "ok", "feedback": req.feedback}
     except Exception as e:
         log.error(f"[feedback] DB insert FAILED: {e}", exc_info=True)
@@ -456,9 +480,9 @@ def feedback_endpoint(req: FeedbackRequest):
 @app.get("/api/session/{session_id}/messages")
 def get_session_messages(session_id: str, limit: int = 20):
     try:
-        resp = (
-            get_sb()
-            .table("session_messages")
+        # FIX 3: Use retry wrapper for session message fetches
+        resp = _sb_with_retry(
+            lambda sb: sb.table("session_messages")
             .select("message_id, user_message, assistant_message, timestamp")
             .eq("session_id", session_id)
             .order("timestamp", desc=False)
@@ -477,9 +501,9 @@ def list_conversations(user_id: str = "", limit: int = 50):
     if not user_id:
         return {"conversations": []}
     try:
-        resp = (
-            get_sb()
-            .table("session_messages")
+        # FIX 3: Use retry wrapper for conversation fetches
+        resp = _sb_with_retry(
+            lambda sb: sb.table("session_messages")
             .select("session_id, user_message, timestamp")
             .eq("user_id", user_id)
             .order("timestamp", desc=False)
@@ -520,17 +544,16 @@ def list_documents(search: str = "", limit: int = 20):
     with chunk counts joined from sama_nora_chunks.
     """
     try:
-        doc_resp = (
-            get_sb()
-            .table("documents")
+        # FIX 3: Use retry wrapper for document fetches
+        doc_resp = _sb_with_retry(
+            lambda sb: sb.table("documents")
             .select("document_name, source_type, total_pages")
             .execute()
         )
         all_docs = doc_resp.data or []
 
-        chunks_resp = (
-            get_sb()
-            .table("sama_nora_chunks")
+        chunks_resp = _sb_with_retry(
+            lambda sb: sb.table("sama_nora_chunks")
             .select("document_name")
             .execute()
         )
@@ -573,14 +596,18 @@ def admin_stats():
     """Return system metrics for the dashboard info card."""
     docs_count = 0
     try:
-        d = get_sb().table("documents").select("id", count="exact").execute()
+        d = _sb_with_retry(
+            lambda sb: sb.table("documents").select("id", count="exact").execute()
+        )
         docs_count = d.count or 0
     except Exception as e:
         log.warning(f"[stats] docs count failed: {e}")
 
     chunks_count = 0
     try:
-        c = get_sb().table("sama_nora_chunks").select("id", count="exact").execute()
+        c = _sb_with_retry(
+            lambda sb: sb.table("sama_nora_chunks").select("id", count="exact").execute()
+        )
         chunks_count = c.count or 0
     except Exception as e:
         log.warning(f"[stats] chunks count failed: {e}")

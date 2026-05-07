@@ -32,6 +32,7 @@ htmlcov/
 # Logs
 *.log
 backend/test_logs/
+backend/logs/
 
 # Local databases and temp files
 *.sqlite
