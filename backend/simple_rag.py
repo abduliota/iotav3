@@ -24,6 +24,8 @@ Improvements in this version:
   - [IMPROVEMENT] Arabic citation format added to SYSTEM_PROMPT
   - [FIX v4] Added PEP/KYC/onboarding/UBO/sanctions query expansions
   - [FIX v4] Clear sources when LLM returns not-found answer (Problem 2 fix)
+  - [FIX v5] Removed inline citations from answer text — citations now appear in
+    sources panel only, keeping answer text clean and readable for end users.
 """
 
 from __future__ import annotations
@@ -131,31 +133,21 @@ CCC+   = Enhanced on-site assessment level under Aramco's cybersecurity certific
 STRICT ANSWERING RULES
 ═══════════════════════════════════════════════════
 1. Write 2-3 natural sentences maximum. Stop immediately after 3 sentences. Never write 4 or more.
-2. Add an inline citation after EVERY sentence: (Document Name, Page X). Use the exact document name and page number from the passage header — do not abbreviate or invent.
+2. Do NOT include any document names, file names, page numbers, or source references inside the answer text. The answer must read as clean natural language with no citations, brackets, or parenthetical references of any kind. Sources are displayed separately by the system.
 3. Do NOT add any detail, number, percentage, condition, or proper noun that does not appear word-for-word in the provided passages.
 4. Do NOT make inferences, draw conclusions, or apply general regulatory knowledge. Report only what the text explicitly states.
-5. If the user writes in Arabic, answer entirely in Arabic using the same citation rules. Arabic citation format: (اسم الوثيقة، الصفحة X).
+5. If the user writes in Arabic, answer entirely in Arabic in clean natural language with no inline citations.
 6. Pay close attention to restrictive language — "shall not", "not permitted", "prohibited", "not eligible", "not allowed", "may not", "لا يجوز", "يُحظر", "غير مؤهل", "لا يحق" — these indicate hard restrictions and must be reported accurately and completely, not paraphrased as affirmative statements.
 7. When a question involves a specific numeric threshold (percentage, SAR amount, ratio, number of days), quote the exact figure from the passage. Do not round, estimate, or substitute a similar figure.
-8. When two passages appear to conflict, cite both and note the apparent difference. Do not silently prefer one over the other.
+8. When two passages appear to conflict, note the apparent difference in the answer without mentioning document names or page numbers.
 9. If the answer is not explicitly stated in any provided passage, write ONLY: "The provided documentation does not contain a clear answer to this question." Do not attempt a partial answer.
-
-═══════════════════════════════════════════════════
-CITATION EXAMPLES — what GROUNDED looks like
-═══════════════════════════════════════════════════
-CORRECT: "Banks must maintain a minimum capital adequacy ratio of 8 percent at all times. (SAMA Basel III Guidelines, Page 15)"
-WRONG:   "Banks must maintain a minimum capital adequacy ratio of 8 percent, consistent with international Basel III standards adopted globally." [adds unreferenced context]
-
-CORRECT: "The bank shall not open accounts for non-GCC, non-resident government entities unless official approval of the Minister of Foreign Affairs is granted. (SAMA EN 1644 VER1, Page 104)"
-WRONG:   "Non-GCC entities generally face restrictions when opening bank accounts." [vague paraphrase loses the specific condition]
-
-CORRECT: "لا يجوز للبنك فتح حسابات لجهات حكومية غير مقيمة من خارج دول مجلس التعاون إلا بموافقة رسمية من وزير الخارجية. (SAMA EN 1644 VER1، الصفحة 104)"
 
 ═══════════════════════════════════════════════════
 ABSOLUTELY FORBIDDEN
 ═══════════════════════════════════════════════════
+- Do NOT include document names, file names, regulation codes, page numbers, or any source reference inside the answer text. Examples of what must never appear in the answer: "(SAMA EN 1644 VER1, Page 44)", "(Page 100)", "(SAMA Basel III Guidelines, Page 15)".
 - Do not use phrases like: generally speaking, typically, in most cases, overall, in summary, additionally, it is important to note, it should be noted, this ensures that, by adhering to, in many countries, internationally.
-- Do not invent or guess organization names, regulation codes, SAR amounts, percentages, or article numbers not present in the context.
+- Do not invent or guess organization names, SAR amounts, percentages, or article numbers not present in the context.
 - Do not add a concluding sentence that generalizes, contextualizes, or extends beyond what the passages state.
 - Do not combine information from the context with your general training knowledge about Saudi regulations, Basel III, or any other regulatory framework.
 - Do not answer out-of-scope questions about weather, sports, general knowledge, company information, or topics unrelated to Saudi banking, cybersecurity, and data protection regulation."""
@@ -217,7 +209,7 @@ QUERY_EXPANSIONS = {
     "sar":    "suspicious activity report SAR financial intelligence unit SAFIU SAMA AML",
     "pep":    "politically exposed person enhanced due diligence EDD SAMA EN 1704 high risk customer AML",
 
-    # ── PEP / KYC / Onboarding (English) — NEW ────────────────────────────────
+    # ── PEP / KYC / Onboarding (English) ─────────────────────────────────────
     "politically exposed":              "PEP enhanced due diligence senior management approval source of wealth SAMA EN 1704",
     "enhanced due diligence":           "EDD PEP high risk customer enhanced measures SAMA EN 1704 AML CTF",
     "fails enhanced due diligence":     "PEP failed EDD terminate relationship suspicious activity SAMA EN 1704 AML",
@@ -557,7 +549,7 @@ QUERY_EXPANSIONS = {
     "التدقيق الداخلي والاستعداد": "internal audit certification readiness GRC ISO compliance preparation",
     "شهادات GRC":              "GRC certification readiness internal audit ISO 27001 compliance",
 
-    # ── Arabic → English bridges: PEP / KYC / Onboarding — NEW ──────────────
+    # ── Arabic → English bridges: PEP / KYC / Onboarding ────────────────────
     "الشخص المعرض سياسياً":    "PEP politically exposed person enhanced due diligence SAMA EN 1704 AML high risk",
     "العناية المشددة":          "enhanced due diligence EDD PEP high risk customer SAMA EN 1704 AML CTF",
     "العناية الواجبة المعززة":  "enhanced due diligence EDD PEP politically exposed person SAMA EN 1704",
@@ -786,9 +778,11 @@ def _user_prompt(context_text: str, query: str, session_summary: str = "") -> st
         if session_summary else ""
     )
     if _is_arabic(query):
-        instruction = "Answer in Arabic, max 2-3 sentences, include citations. If not found: لا تتوفر إجابة في الوثائق المقدمة"
+        # FIX v5: No inline citations — clean Arabic answer only
+        instruction = "Answer in Arabic in 2-3 clean natural sentences. Do NOT include any document names, file names, or page numbers in the answer. If not found: لا تتوفر إجابة في الوثائق المقدمة"
     else:
-        instruction = "Answer in natural sentences, max 3 sentences, include inline citations."
+        # FIX v5: No inline citations — clean answer text only
+        instruction = "Answer in 2-3 clean natural sentences. Do NOT include any document names, file names, page numbers, or parenthetical source references in the answer text."
     return f"{summary_block}<context>\n{context_text}\n</context>\n\nQuestion: {query}\n\n{instruction}\n\nAnswer:"
 
 _DRIFT_SIGNALS = [
@@ -811,6 +805,22 @@ def _truncate_at_drift(text: str) -> str:
             break
     return " ".join(kept).strip() if kept else text
 
+def _strip_inline_citations(text: str) -> str:
+    """
+    FIX v5: Post-processing safety net — strip any inline citations the LLM
+    may still produce despite the prompt instruction, e.g.:
+      (SAMA EN 1644 VER1, Page 44)
+      (Page 100)
+      (SAMA Basel III Guidelines, Pages 15-16)
+    """
+    # Remove patterns like (Any text, Page X) or (Any text, Pages X-Y)
+    text = re.sub(r"\s*\([^)]*[Pp]ages?\s*\d+[^)]*\)", "", text)
+    # Remove standalone (Page X) or (Pages X-Y)
+    text = re.sub(r"\s*\([Pp]ages?\s*[\d\-]+\)", "", text)
+    # Clean up any double spaces left behind
+    text = re.sub(r"  +", " ", text).strip()
+    return text
+
 def _clean_output(text: str, query: str) -> str:
     for marker in ["Question:", "User:", "Human:", "<context>", "Note:", "System:"]:
         if marker in text:
@@ -824,6 +834,8 @@ def _clean_output(text: str, query: str) -> str:
     text = text.strip()
     if not _is_arabic(query):
         text = _truncate_at_drift(text)
+    # FIX v5: Always strip any remaining inline citations as a safety net
+    text = _strip_inline_citations(text)
     return text
 
 def _generate_qwen(ctx: str, query: str, on_chunk: Optional[Callable] = None,
@@ -954,7 +966,7 @@ def answer_query(
     answer = _generate(build_context(chunks), query, on_chunk, session_summary=session_summary)
     answer = _strip_trailing_not_found(answer)
 
-    # ── FIX: If LLM says not found, return empty sources (Problem 2 fix) ──────
+    # If LLM says not found, return empty sources
     if _is_not_found_answer(answer):
         if debug: print(f"[pipeline] LLM returned not-found — clearing sources for clean UX")
         return {
@@ -965,7 +977,6 @@ def answer_query(
             "candidate_count": len(candidates),
             "reranker_top_score": reranker_top_score,
         }
-    # ─────────────────────────────────────────────────────────────────────────
 
     seen: set[tuple] = set()
     sources = []
