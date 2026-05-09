@@ -97,7 +97,7 @@ function App() {
   const [selectedLatestContextIndex, setSelectedLatestContextIndex] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const chatBodyRef = useRef<HTMLDivElement | null>(null);
+  const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const identityRef = useRef<HTMLDivElement | null>(null);
 
   const apiBase = useMemo(() => API_BASE.replace(/\/$/, ""), []);
@@ -358,8 +358,8 @@ function App() {
   }, [api]);
 
   const scrollToBottom = () => {
-    if (chatBodyRef.current) {
-      chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight;
+    if (chatThreadRef.current) {
+      chatThreadRef.current.scrollTop = chatThreadRef.current.scrollHeight;
     }
   };
 
@@ -703,8 +703,8 @@ function App() {
               </div>
             </div>
 
-            <div className="chat-body" ref={chatBodyRef}>
-              <div className="chat-thread">
+            <div className="chat-body">
+              <div className="chat-thread" ref={chatThreadRef}>
                 {messages.length === 0 && (
                   <div className="empty">
                     No messages yet. Ask your first question.
