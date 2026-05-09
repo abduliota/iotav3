@@ -79,6 +79,28 @@ NORA_FALLBACK = (
     "digital architecture aligned with national standards."
 )
 
+# ── Answer size config ────────────────────────────────────────────────────────
+# Maps the user-selected chunk count (top_k) to:
+#   max_sentences : sentence cap for the LLM instruction and drift truncation
+#   max_tokens    : token budget for the LLM call
+#   fetch_k       : how many candidates to fetch before reranking
+ANSWER_SIZE_CONFIG = [
+    (5,   {"max_sentences": 3,  "max_tokens": 300,  "fetch_k": 20}),
+    (10,  {"max_sentences": 5,  "max_tokens": 500,  "fetch_k": 25}),
+    (20,  {"max_sentences": 7,  "max_tokens": 700,  "fetch_k": 40}),
+    (40,  {"max_sentences": 10, "max_tokens": 900,  "fetch_k": 60}),
+    (80,  {"max_sentences": 15, "max_tokens": 1200, "fetch_k": 100}),
+    (100, {"max_sentences": 20, "max_tokens": 1500, "fetch_k": 120}),
+]
+
+def _answer_config(top_k: int) -> dict:
+    """Return answer generation config for the given chunk count."""
+    for threshold, cfg in ANSWER_SIZE_CONFIG:
+        if top_k <= threshold:
+            return cfg
+    return ANSWER_SIZE_CONFIG[-1][1]  # cap at largest
+
+
 def _is_not_found_answer(answer: str) -> bool:
     a = answer.lower()
     return any(p in a for p in [
@@ -138,7 +160,7 @@ CCC+   = Enhanced on-site assessment level under Aramco's cybersecurity certific
 ═══════════════════════════════════════════════════
 STRICT ANSWERING RULES
 ═══════════════════════════════════════════════════
-1. Write 2-3 natural sentences maximum. Stop immediately after 3 sentences. Never write 4 or more.
+1. Write the exact number of sentences specified in the Answer instruction below. Never exceed that count. Default to 3 sentences if no count is given.
 2. Do NOT include any document names, file names, page numbers, or source references inside the answer text. The answer must read as clean natural language with no citations, brackets, or parenthetical references of any kind. Sources are displayed separately by the system.
 3. Do NOT add any detail, number, percentage, condition, or proper noun that does not appear word-for-word in the provided passages.
 4. Do NOT make inferences, draw conclusions, or apply general regulatory knowledge. Report only what the text explicitly states.
@@ -997,17 +1019,22 @@ def build_context(chunks: list[dict]) -> str:
         parts.append(f"[Passage {i}] ({ref})\n{c['content']}")
     return "\n\n".join(parts)
 
-def _user_prompt(context_text: str, query: str, session_summary: str = "") -> str:
+def _user_prompt(context_text: str, query: str, session_summary: str = "", max_sentences: int = 3) -> str:
     summary_block = (
         f"<conversation_context>\n{session_summary}\n</conversation_context>\n\n"
         if session_summary else ""
     )
     if _is_arabic(query):
-        # FIX v5: No inline citations — clean Arabic answer only
-        instruction = "Answer in Arabic in 2-3 clean natural sentences. Do NOT include any document names, file names, or page numbers in the answer. If not found: لا تتوفر إجابة في الوثائق المقدمة"
+        instruction = (
+            f"Answer in Arabic in up to {max_sentences} clean natural sentences. "
+            "Do NOT include any document names, file names, or page numbers in the answer. "
+            "If not found: لا تتوفر إجابة في الوثائق المقدمة"
+        )
     else:
-        # FIX v5: No inline citations — clean answer text only
-        instruction = "Answer in 2-3 clean natural sentences. Do NOT include any document names, file names, page numbers, or parenthetical source references in the answer text."
+        instruction = (
+            f"Answer in up to {max_sentences} clean natural sentences. "
+            "Do NOT include any document names, file names, page numbers, or parenthetical source references in the answer text."
+        )
     return f"{summary_block}<context>\n{context_text}\n</context>\n\nQuestion: {query}\n\n{instruction}\n\nAnswer:"
 
 _DRIFT_SIGNALS = [
@@ -1019,14 +1046,14 @@ _DRIFT_SIGNALS = [
     "world bank", "central bank of saudi arabia (cba)",
 ]
 
-def _truncate_at_drift(text: str) -> str:
+def _truncate_at_drift(text: str, max_sentences: int = 3) -> str:
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
     kept = []
     for sent in sentences:
         if any(s in sent.lower() for s in _DRIFT_SIGNALS):
             break
         kept.append(sent)
-        if len(kept) >= 3:
+        if len(kept) >= max_sentences:
             break
     return " ".join(kept).strip() if kept else text
 
@@ -1046,7 +1073,7 @@ def _strip_inline_citations(text: str) -> str:
     text = re.sub(r"  +", " ", text).strip()
     return text
 
-def _clean_output(text: str, query: str) -> str:
+def _clean_output(text: str, query: str, max_sentences: int = 3) -> str:
     for marker in ["Question:", "User:", "Human:", "<context>", "Note:", "System:"]:
         if marker in text:
             text = text[:text.index(marker)].strip()
@@ -1058,24 +1085,24 @@ def _clean_output(text: str, query: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = text.strip()
     if not _is_arabic(query):
-        text = _truncate_at_drift(text)
+        text = _truncate_at_drift(text, max_sentences=max_sentences)
     # FIX v5: Always strip any remaining inline citations as a safety net
     text = _strip_inline_citations(text)
     return text
 
 def _generate_qwen(ctx: str, query: str, on_chunk: Optional[Callable] = None,
-                   session_summary: str = "") -> str:
+                   session_summary: str = "", max_tokens: int = 300, max_sentences: int = 3) -> str:
     pipe = _get_qwen()
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": _user_prompt(ctx, query, session_summary)},
+        {"role": "user",   "content": _user_prompt(ctx, query, session_summary, max_sentences)},
     ]
     full_input = pipe.tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     out = pipe(
         full_input,
-        max_new_tokens=128,
+        max_new_tokens=max_tokens,
         do_sample=False,
         repetition_penalty=1.3,
         pad_token_id=pipe.tokenizer.eos_token_id,
@@ -1083,18 +1110,18 @@ def _generate_qwen(ctx: str, query: str, on_chunk: Optional[Callable] = None,
         temperature=None,
         top_p=None,
     )
-    answer = _clean_output(out[0]["generated_text"], query)
+    answer = _clean_output(out[0]["generated_text"], query, max_sentences)
     if on_chunk: on_chunk(answer)
     return answer
 
 def _generate_openai(ctx: str, query: str, on_chunk: Optional[Callable] = None,
-                     session_summary: str = "") -> str:
+                     session_summary: str = "", max_tokens: int = 300, max_sentences: int = 3) -> str:
     import openai
     stream = openai.OpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         messages=[{"role": "system", "content": SYSTEM_PROMPT},
-                  {"role": "user",   "content": _user_prompt(ctx, query, session_summary)}],
-        temperature=0.1, max_tokens=512, stream=True,
+                  {"role": "user",   "content": _user_prompt(ctx, query, session_summary, max_sentences)}],
+        temperature=0.1, max_tokens=max_tokens, stream=True,
     )
     answer = ""
     for chunk in stream:
@@ -1104,15 +1131,15 @@ def _generate_openai(ctx: str, query: str, on_chunk: Optional[Callable] = None,
     return answer
 
 def _generate_azure(ctx: str, query: str, on_chunk: Optional[Callable] = None,
-                    session_summary: str = "") -> str:
+                    session_summary: str = "", max_tokens: int = 300, max_sentences: int = 3) -> str:
     import openai
     stream = openai.AzureOpenAI(
         api_key=AZURE_OPENAI_KEY, azure_endpoint=AZURE_ENDPOINT, api_version="2024-02-01",
     ).chat.completions.create(
         model=AZURE_DEPLOYMENT,
         messages=[{"role": "system", "content": SYSTEM_PROMPT},
-                  {"role": "user",   "content": _user_prompt(ctx, query, session_summary)}],
-        temperature=0.1, max_tokens=512, stream=True,
+                  {"role": "user",   "content": _user_prompt(ctx, query, session_summary, max_sentences)}],
+        temperature=0.1, max_tokens=max_tokens, stream=True,
     )
     answer = ""
     for chunk in stream:
@@ -1122,12 +1149,12 @@ def _generate_azure(ctx: str, query: str, on_chunk: Optional[Callable] = None,
     return answer
 
 def _generate(ctx: str, query: str, on_chunk: Optional[Callable] = None,
-              session_summary: str = "") -> str:
+              session_summary: str = "", max_tokens: int = 300, max_sentences: int = 3) -> str:
     if LLM_BACKEND == "openai":
-        return _generate_openai(ctx, query, on_chunk, session_summary)
+        return _generate_openai(ctx, query, on_chunk, session_summary, max_tokens, max_sentences)
     if LLM_BACKEND == "azure":
-        return _generate_azure(ctx, query, on_chunk, session_summary)
-    return _generate_qwen(ctx, query, on_chunk, session_summary)
+        return _generate_azure(ctx, query, on_chunk, session_summary, max_tokens, max_sentences)
+    return _generate_qwen(ctx, query, on_chunk, session_summary, max_tokens, max_sentences)
 
 def answer_query(
     user_query: str,
@@ -1182,7 +1209,15 @@ def answer_query(
         return {**cached, "cached": True, "method": "cached"}
 
     final_top_k = top_k or TOP_K
-    candidates  = fetch_chunks_hybrid(expanded, query_vec, limit=RERANK_FETCH_K, subject=subject)
+    config      = _answer_config(final_top_k)
+    fetch_k     = config["fetch_k"]
+    max_tokens  = config["max_tokens"]
+    max_sentences = config["max_sentences"]
+
+    if debug:
+        print(f"[pipeline] top_k={final_top_k} → sentences={max_sentences}, tokens={max_tokens}, fetch_k={fetch_k}")
+
+    candidates  = fetch_chunks_hybrid(expanded, query_vec, limit=fetch_k, subject=subject)
 
     if debug:
         print(f"\n[pipeline] {len(candidates)} hybrid candidates for: '{query}'")
@@ -1203,7 +1238,8 @@ def answer_query(
         if on_chunk: on_chunk(NOT_FOUND)
         return {"answer": NOT_FOUND, "sources": [], "cached": False, "method": "not_found"}
 
-    answer = _generate(build_context(chunks), query, on_chunk, session_summary=session_summary)
+    answer = _generate(build_context(chunks), query, on_chunk, session_summary=session_summary,
+                       max_tokens=max_tokens, max_sentences=max_sentences)
     answer = _strip_trailing_not_found(answer)
 
     # If LLM says not found, return empty sources

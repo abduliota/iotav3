@@ -42,7 +42,8 @@ type ApiStatus = "live" | "building";
 const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined) ??
   "/backend";
-const DEFAULT_TOP_K = 5;
+// Discrete chunk count options for the answer size slider
+const CHUNK_OPTIONS = [5, 10, 20, 40, 80, 100] as const;
 const formatModelLabel = (model?: string) => {
   if (!model) return "Model unavailable";
   const normalized = model.toLowerCase();
@@ -96,6 +97,9 @@ function App() {
   >({});
   const [selectedLatestContextIndex, setSelectedLatestContextIndex] = useState(0);
   const [documentFilter, setDocumentFilter] = useState<string>("All");
+  // Slider state: index into CHUNK_OPTIONS → [5, 10, 20, 40, 80, 100]
+  const [topKIndex, setTopKIndex] = useState<number>(0);
+  const topK = CHUNK_OPTIONS[topKIndex];
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
@@ -422,7 +426,7 @@ function App() {
     try {
       const data = await api.queryAnswer({
         query: trimmed,
-        top_k: DEFAULT_TOP_K,
+        top_k: topK,
         user_id: userId,
         session_id: activeSessionId,
       });
@@ -728,6 +732,35 @@ function App() {
                   {messages.length} messages
                 </span>
               </div>
+            </div>
+
+            {/* Answer size slider */}
+            <div className="answer-size-row">
+              <span className="answer-size-label">Answer depth</span>
+              <div className="answer-size-slider-wrap">
+                <input
+                  type="range"
+                  min={0}
+                  max={CHUNK_OPTIONS.length - 1}
+                  step={1}
+                  value={topKIndex}
+                  onChange={(e) => setTopKIndex(Number(e.target.value))}
+                  className="answer-size-slider"
+                  style={{ "--slider-pct": `${(topKIndex / (CHUNK_OPTIONS.length - 1)) * 100}%` } as React.CSSProperties}
+                  disabled={chatLoading}
+                />
+                <div className="answer-size-ticks">
+                  {CHUNK_OPTIONS.map((v, i) => (
+                    <span
+                      key={v}
+                      className={`answer-size-tick ${topKIndex === i ? "answer-size-tick-active" : ""}`}
+                    >
+                      {v}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <span className="answer-size-value">{topK} chunks</span>
             </div>
 
             <div className="chat-body">
