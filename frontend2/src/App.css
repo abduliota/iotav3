@@ -437,6 +437,38 @@
   flex: 1;
 }
 
+/* ── Document source filter ──────────────────────────────────────────────── */
+.doc-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.doc-filter-btn {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.doc-filter-btn:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.doc-filter-active {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+  color: #4338ca;
+}
+/* ─────────────────────────────────────────────────────────────────────────── */
+
 .btn-small {
   padding: 8px 10px;
   font-size: 12px;

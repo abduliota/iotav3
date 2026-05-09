@@ -95,6 +95,7 @@ function App() {
     Record<string, number>
   >({});
   const [selectedLatestContextIndex, setSelectedLatestContextIndex] = useState(0);
+  const [documentFilter, setDocumentFilter] = useState<string>("All");
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
@@ -362,6 +363,18 @@ function App() {
       chatThreadRef.current.scrollTop = chatThreadRef.current.scrollHeight;
     }
   };
+
+  const KNOWN_SOURCE_TYPES = ["SAMA", "NCA", "ISO", "SDAIA"];
+
+  const filteredDocuments = useMemo(() => {
+    if (documentFilter === "All") return documents;
+    if (documentFilter === "Other") {
+      return documents.filter(
+        (d) => !d.source_type || !KNOWN_SOURCE_TYPES.includes(d.source_type)
+      );
+    }
+    return documents.filter((d) => d.source_type === documentFilter);
+  }, [documents, documentFilter]);
 
   const latestAssistant = useMemo(
     () => [...messages].reverse().find((msg) => msg.role === "assistant"),
@@ -649,6 +662,18 @@ function App() {
                 </button>
               )}
             </div>
+            <div className="doc-filter-row">
+              {["All", "SAMA", "NCA", "ISO", "SDAIA", "Other"].map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  className={`doc-filter-btn ${documentFilter === f ? "doc-filter-active" : ""}`}
+                  onClick={() => setDocumentFilter(f)}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
             {/* FIX 2: Show friendly message instead of raw ConnectionTerminated exception */}
             {documentsError && (
               <div className="status status-error compact-status">
@@ -657,16 +682,18 @@ function App() {
             )}
             {documentsLoading ? (
               <div className="empty rail-empty">Loading documents...</div>
-            ) : documents.length === 0 ? (
+            ) : filteredDocuments.length === 0 ? (
               <div className="empty rail-empty">
                 {debouncedDocumentSearch
                   ? "No documents match your search."
+                  : documentFilter !== "All"
+                  ? `No ${documentFilter} documents found.`
                   : "No indexed documents available right now."}
               </div>
             ) : (
               <div className="doc-list">
                 <ul>
-                  {documents.map((d) => (
+                  {filteredDocuments.map((d) => (
                     <li key={d.document_name}>
                       <span className="doc-name">{d.document_name}</span>
                       <span className="doc-meta">
