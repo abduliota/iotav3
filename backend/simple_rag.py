@@ -186,6 +186,60 @@ def _is_nora_definition_query(query: str) -> bool:
     return False
 
 
+# ── Query normalisation ───────────────────────────────────────────────────────
+# Strips meta-phrasing like "what knowledge do you have of X" → "what is X"
+# so the embedding and keyword search focus on the actual subject.
+META_PATTERNS = [
+    (r"what (knowledge|info|information|details) do you have (on|about|of)\s+", "what is "),
+    (r"what do you know (about|of|on)\s+",                                       "what is "),
+    (r"can you (explain|describe|summarise|summarize|tell me about)\s+",          "what is "),
+    (r"do you have (info|information|knowledge|details|data) (on|about|of)\s+",   "what is "),
+    (r"tell me (about|what you know about|more about)\s+",                        "what is "),
+    (r"give me (info|information|details|an overview) (on|about|of)\s+",          "what is "),
+    (r"(show|send|list|provide) (me )?(the )?(details|info|information) (on|about|of)\s+", "what is "),
+    (r"(show|send|list|provide) (me )?(the )?\s+",                                "what is "),
+    (r"i (want|need|would like) (to know|information) (about|on|of)\s+",          "what is "),
+    (r"(explain|describe) (to me )?(the |a |an )?\s+",                            "what is "),
+]
+
+def _normalise_query(query: str) -> str:
+    """
+    Strip meta-phrasing and extract the real subject of the question.
+    e.g. "what knowledge do you have of cobit?" → "what is cobit?"
+         "send SAMA guidelines" → "what is SAMA guidelines"
+         "can you explain PEP?" → "what is PEP?"
+    """
+    q = query.strip()
+    q_lower = q.lower().rstrip("?.")
+    for pattern, replacement in META_PATTERNS:
+        match = re.search(pattern, q_lower)
+        if match:
+            subject = q[match.end():].strip().rstrip("?.")
+            if subject:
+                normalised = replacement + subject
+                print(f"[normalise] '{q}' → '{normalised}'")
+                return normalised
+    return q
+
+
+def _extract_subject(query: str) -> str:
+    """
+    Extract the core subject term(s) from a query for use in keyword (BM25) search.
+    Removes question words and meta-starters so BM25 gets the cleanest possible signal.
+    e.g. "what is cobit?" → "cobit"
+         "what are the AML obligations?" → "AML obligations"
+    """
+    q = query.strip().lower().rstrip("?.")
+    # Remove leading question starters
+    starters = r"^(what is|what are|what does|how does|how do|explain|describe|define|tell me about|give me|show me|send me|list|provide)\s+"
+    subject = re.sub(starters, "", q).strip()
+    # Remove filler words
+    fillers = r"\b(the|a|an|some|all|any|their|its|our|your|my)\b"
+    subject = re.sub(fillers, " ", subject).strip()
+    subject = re.sub(r"\s{2,}", " ", subject).strip()
+    return subject if subject else query.strip()
+
+
 QUERY_EXPANSIONS = {
     # ── English acronyms ──────────────────────────────────────────────────────
     "kyc":    "know your customer customer due diligence verification identification",
@@ -729,9 +783,17 @@ def fetch_chunks_keyword(query: str, limit: int = 10) -> list[dict]:
         print(f"[hybrid] Keyword search unavailable: {e}")
         return []
 
-def fetch_chunks_hybrid(query: str, query_vec: list[float], limit: int = 15) -> list[dict]:
+def fetch_chunks_hybrid(query: str, query_vec: list[float], limit: int = 15, subject: str = "") -> list[dict]:
     vector_results  = fetch_chunks(query_vec, limit=limit)
-    keyword_results = fetch_chunks_keyword(query, limit=limit) if HYBRID_SEARCH else []
+    keyword_results: list[dict] = []
+    if HYBRID_SEARCH:
+        # Run keyword search on the full expanded query
+        keyword_results = fetch_chunks_keyword(query, limit=limit)
+        # Also run keyword search on the extracted subject if it differs meaningfully
+        if subject and subject.lower() != query.lower() and len(subject) >= 3:
+            subject_results = fetch_chunks_keyword(subject, limit=limit)
+            # Merge subject results in — dedup happens below
+            keyword_results = keyword_results + subject_results
     seen_ids: set = set()
     merged: list[dict] = []
     for chunk in vector_results + keyword_results:
@@ -934,6 +996,11 @@ def answer_query(
         if on_chunk: on_chunk(answer)
         return {"answer": answer, "sources": [], "cached": False, "method": "out_of_scope"}
 
+    # Normalise meta-phrasing before expansion and embedding
+    query = _normalise_query(query)
+    # Extract the core subject for enhanced BM25 keyword search
+    subject = _extract_subject(query)
+
     expanded  = _expand_query(query)
     query_vec = _embed(expanded)
 
@@ -943,10 +1010,11 @@ def answer_query(
         return {**cached, "cached": True, "method": "cached"}
 
     final_top_k = top_k or TOP_K
-    candidates  = fetch_chunks_hybrid(expanded, query_vec, limit=RERANK_FETCH_K)
+    candidates  = fetch_chunks_hybrid(expanded, query_vec, limit=RERANK_FETCH_K, subject=subject)
 
     if debug:
         print(f"\n[pipeline] {len(candidates)} hybrid candidates for: '{query}'")
+        print(f"[pipeline] subject: '{subject}'")
         print(f"[pipeline] expanded: '{expanded[:120]}...'")
         for i, c in enumerate(candidates[:5]):
             print(f"  [{i+1}] sim={c.get('similarity',0):.4f} | {c.get('document_name','?')} p{c.get('page_start','?')}")
