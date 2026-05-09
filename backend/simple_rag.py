@@ -26,6 +26,12 @@ Improvements in this version:
   - [FIX v4] Clear sources when LLM returns not-found answer (Problem 2 fix)
   - [FIX v5] Removed inline citations from answer text — citations now appear in
     sources panel only, keeping answer text clean and readable for end users.
+  - [FIX v6] Added _normalise_informal(): maps u→you, ur→your, r→are, pls→please, etc.
+  - [FIX v6] Added yes/no question normalisation: "can X do Y?" → "what are the rules for Y?"
+  - [FIX v6] Fuzzy phrase expansion: tolerates filler words (e.g. "who all cannot create")
+  - [FIX v6] Nationality expansions: indian/american/expat → non-GCC non-Saudi natural person
+  - [FIX v6] Auto domain anchor: restriction queries without "SAMA" get SAMA EN 1644 injected
+  - [FIX v6] Cache hits now have _strip_inline_citations applied before returning
 """
 
 from __future__ import annotations
@@ -187,8 +193,112 @@ def _is_nora_definition_query(query: str) -> bool:
 
 
 # ── Query normalisation ───────────────────────────────────────────────────────
+
+# Issue 1 Fix: informal/abbreviated language map
+# Applied before everything else so "u" → "you" before META_PATTERNS run
+INFORMAL_MAP = [
+    (r"\bu\b",      "you"),
+    (r"\bur\b",     "your"),
+    (r"\br\b",      "are"),
+    (r"\bpls\b",    "please"),
+    (r"\bplz\b",    "please"),
+    (r"\bwht\b",    "what"),
+    (r"\bwut\b",    "what"),
+    (r"\bhw\b",     "how"),
+    (r"\bcud\b",    "could"),
+    (r"\bwud\b",    "would"),
+    (r"\bshud\b",   "should"),
+    (r"\bgonna\b",  "going to"),
+    (r"\bwanna\b",  "want to"),
+    (r"\bgimme\b",  "give me"),
+    (r"\btelme\b",  "tell me"),
+    (r"\bthx\b",    "thanks"),
+    (r"\bthnx\b",   "thanks"),
+    (r"\bbtw\b",    "by the way"),
+    (r"\bfyi\b",    "for your information"),
+    (r"\bsmth\b",   "something"),
+    (r"\bsmthg\b",  "something"),
+    (r"\binfo\b",   "information"),
+    (r"\bdetails\b","details"),
+]
+
+def _normalise_informal(query: str) -> str:
+    """
+    Issue 1 Fix: Replace informal abbreviations with formal equivalents.
+    Runs before everything else so downstream patterns work correctly.
+    e.g. "what do u know about cobit?" → "what do you know about cobit?"
+    """
+    q = query
+    for pattern, replacement in INFORMAL_MAP:
+        q = re.sub(pattern, replacement, q, flags=re.IGNORECASE)
+    return q
+
+
+# Issue 5 Fix: yes/no question normalisation
+# "can an indian create a bank account?" → "what are the rules for creating a bank account?"
+YES_NO_PATTERNS = [
+    # "can/could X verb Y?" → "what are the rules for verb Y?"
+    (r"^can (?:a|an|the)?\s*\w+(?:\s+\w+)? (create|open|have|get|obtain|use|access|apply for|hold)\s+(.+?)\??$",
+     r"what are the rules for \1 \2"),
+    (r"^could (?:a|an|the)?\s*\w+(?:\s+\w+)? (create|open|have|get|obtain|use|access|apply for|hold)\s+(.+?)\??$",
+     r"what are the rules for \1 \2"),
+    # "is X allowed to verb Y?" → "what are the rules for verb Y?"
+    (r"^is (?:a|an|the)?\s*\w+(?:\s+\w+)? (?:allowed|permitted|eligible) to\s+(.+?)\??$",
+     r"what are the rules for \1"),
+    # "are X allowed to verb Y?" → "what are the rules for verb Y?"
+    (r"^are (?:\w+(?:\s+\w+)?)? (?:allowed|permitted|eligible) to\s+(.+?)\??$",
+     r"what are the rules for \1"),
+    # "is it possible for X to Y?" → "what are the rules for Y?"
+    (r"^is it (?:possible|allowed|permitted) for (?:a|an|the)?\s*\w+(?:\s+\w+)? to\s+(.+?)\??$",
+     r"what are the rules for \1"),
+]
+
+def _normalise_yes_no(query: str) -> str:
+    """
+    Issue 5 Fix: Convert yes/no questions to factual regulatory questions.
+    e.g. "can an indian create a bank account?" → "what are the rules for create a bank account?"
+    """
+    q = query.strip()
+    q_lower = q.lower().rstrip("?.")
+    for pattern, replacement in YES_NO_PATTERNS:
+        match = re.match(pattern, q_lower, re.IGNORECASE)
+        if match:
+            normalised = re.sub(pattern, replacement, q_lower, flags=re.IGNORECASE).strip()
+            print(f"[yes_no] '{q}' → '{normalised}'")
+            return normalised
+    return q
+
+
+# Issue 7 Fix: restriction query domain anchor
+# If a query is about restrictions/prohibitions but has no SAMA anchor,
+# inject SAMA EN 1644 terms to prevent it from floating without direction.
+RESTRICTION_SIGNALS = [
+    "cannot", "can not", "cannot open", "not allowed", "not permitted",
+    "prohibited", "who cannot", "who can't", "not eligible", "ineligible",
+    "restrictions", "restrict", "forbidden", "banned", "cannot create",
+    "cannot have", "not create", "not open",
+]
+
+DOMAIN_ANCHOR = (
+    "bank account opening restrictions prohibited SAMA EN 1644 "
+    "saudi arabian monetary authority shall not eligible"
+)
+
+def _inject_domain_anchor(query: str, expanded: str) -> str:
+    """
+    Issue 7 Fix: If query contains restriction language but no SAMA anchor,
+    append SAMA EN 1644 domain anchor to prevent the query from floating.
+    """
+    q_lower = query.lower()
+    has_restriction = any(s in q_lower for s in RESTRICTION_SIGNALS)
+    has_domain_anchor = "sama" in q_lower or "1644" in q_lower or "saudi" in q_lower
+    if has_restriction and not has_domain_anchor:
+        print(f"[anchor] Injecting domain anchor for restriction query: '{query}'")
+        return expanded + " " + DOMAIN_ANCHOR
+    return expanded
+
+
 # Strips meta-phrasing like "what knowledge do you have of X" → "what is X"
-# so the embedding and keyword search focus on the actual subject.
 META_PATTERNS = [
     (r"what (knowledge|info|information|details) do you have (on|about|of)\s+", "what is "),
     (r"what do you know (about|of|on)\s+",                                       "what is "),
@@ -414,7 +524,36 @@ QUERY_EXPANSIONS = {
     "who is not allowed":            "restrictions prohibited not permitted not eligible SAMA regulations shall not",
     "not allowed to open":           "restrictions prohibited cannot open bank account SAMA EN 1644 shall not",
 
-    # ── Restriction queries — Arabic ──────────────────────────────────────────
+    # ── Filler-word variants (Issue 4 Fix) ───────────────────────────────────
+    # "who all cannot" has "all" between "who" and "cannot" breaking exact match
+    "who all cannot create":     "restrictions prohibited not eligible cannot open bank account SAMA EN 1644",
+    "who all cannot open":       "restrictions prohibited not eligible cannot open bank account SAMA EN 1644",
+    "who all can not":           "restrictions prohibited not eligible cannot open bank account SAMA EN 1644",
+    "who all are not allowed":   "restrictions prohibited not permitted bank account SAMA EN 1644 shall not",
+    "who all is not allowed":    "restrictions prohibited not permitted bank account SAMA EN 1644 shall not",
+    "who else cannot":           "restrictions prohibited not eligible cannot open bank account SAMA EN 1644",
+    "who else can not":          "restrictions prohibited not eligible cannot open bank account SAMA EN 1644",
+
+    # ── Nationality → category expansions (Issue 6 Fix) ──────────────────────
+    # Documents use "non-GCC non-Saudi natural person" — users use specific nationalities
+    "indian":     "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "american":   "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "british":    "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "european":   "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "pakistani":  "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "egyptian":   "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "filipino":   "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "bangladeshi":"non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "chinese":    "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "expat":      "non-Saudi non-GCC natural person expatriate resident bank account SAMA EN 1644",
+    "expatriate": "non-Saudi non-GCC natural person expatriate resident bank account SAMA EN 1644",
+    "foreigner":  "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644 restrictions",
+    "foreign national": "non-Saudi non-GCC natural person non-resident bank account SAMA EN 1644",
+    "non-saudi":  "non-Saudi natural person bank account eligibility restrictions SAMA EN 1644",
+    "non saudi":  "non-Saudi natural person bank account eligibility restrictions SAMA EN 1644",
+    "non-gcc":    "non-GCC natural person bank account eligibility restrictions SAMA EN 1644",
+    "non gcc":    "non-GCC natural person bank account eligibility restrictions SAMA EN 1644",
+    "gcc national": "GCC natural person bank account eligibility SAMA EN 1644 resident",
     "من لا يمكنه فتح حساب":          "bank account restrictions prohibited persons cannot open SAMA EN 1644 shall not",
     "المحظورون من فتح حساب":          "bank account restrictions prohibited not permitted SAMA regulations shall not",
     "من لا يحق له فتح حساب":          "bank account restrictions prohibited persons not eligible SAMA EN 1644",
@@ -634,15 +773,39 @@ QUERY_EXPANSIONS = {
 
 
 def _expand_query(query: str) -> str:
+    """
+    Match expansion keys against the query and append expansion terms.
+    Issue 4 Fix: Also tries fuzzy multi-word matching that tolerates 1-2
+    filler words between key terms (e.g. "who all cannot" matches "who cannot").
+    """
     q = query.strip()
     expansions = []
     q_lower = q.lower()
     for key, expansion in QUERY_EXPANSIONS.items():
         key_lower = key.lower()
-        if len(key) <= 20 and re.search(rf"\b{re.escape(key_lower)}\b", q_lower):
+        matched = False
+
+        # Standard exact match
+        if len(key) <= 20:
+            if re.search(rf"\b{re.escape(key_lower)}\b", q_lower):
+                matched = True
+        else:
+            if key_lower in q_lower:
+                matched = True
+
+        # Issue 4 Fix: Fuzzy match for short multi-word keys (2-4 words)
+        # Allows up to 2 words between the key's words
+        if not matched and 2 <= len(key_lower.split()) <= 4 and len(key) <= 30:
+            words = key_lower.split()
+            # Build pattern: word1 ... word2 ... word3 with up to 2 words between each
+            fuzzy_pattern = r"\b" + r"\b(?:\s+\w+){0,2}\s+\b".join(re.escape(w) for w in words) + r"\b"
+            if re.search(fuzzy_pattern, q_lower):
+                matched = True
+                print(f"[fuzzy_expand] '{key}' matched in '{q_lower}'")
+
+        if matched:
             expansions.append(expansion)
-        elif len(key) > 20 and key_lower in q_lower:
-            expansions.append(expansion)
+
     return (q + " " + " ".join(expansions)).strip() if expansions else q
 
 
@@ -996,17 +1159,26 @@ def answer_query(
         if on_chunk: on_chunk(answer)
         return {"answer": answer, "sources": [], "cached": False, "method": "out_of_scope"}
 
-    # Normalise meta-phrasing before expansion and embedding
+    # Issue 1 Fix: normalise informal/abbreviated language first
+    query = _normalise_informal(query)
+    # Issue 5 Fix: convert yes/no questions to factual regulatory questions
+    query = _normalise_yes_no(query)
+    # Normalise meta-phrasing ("what do you know about X" → "what is X")
     query = _normalise_query(query)
     # Extract the core subject for enhanced BM25 keyword search
     subject = _extract_subject(query)
 
     expanded  = _expand_query(query)
+    # Issue 7 Fix: inject domain anchor for restriction queries with no SAMA signal
+    expanded  = _inject_domain_anchor(query, expanded)
     query_vec = _embed(expanded)
 
     cached = _cache_lookup(query_vec)
     if cached:
-        if on_chunk: on_chunk(cached["answer"])
+        # Issue 2 Fix: strip any inline citations from cached answers before returning
+        cached_answer = _strip_inline_citations(cached.get("answer", ""))
+        cached["answer"] = cached_answer
+        if on_chunk: on_chunk(cached_answer)
         return {**cached, "cached": True, "method": "cached"}
 
     final_top_k = top_k or TOP_K
