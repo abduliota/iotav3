@@ -97,6 +97,7 @@ function App() {
   const [selectedLatestContextIndex, setSelectedLatestContextIndex] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const identityRef = useRef<HTMLDivElement | null>(null);
 
   const apiBase = useMemo(() => API_BASE.replace(/\/$/, ""), []);
@@ -357,7 +358,9 @@ function App() {
   }, [api]);
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (chatBodyRef.current) {
+      chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight;
+    }
   };
 
   const latestAssistant = useMemo(
@@ -700,7 +703,7 @@ function App() {
               </div>
             </div>
 
-            <div className="chat-body">
+            <div className="chat-body" ref={chatBodyRef}>
               <div className="chat-thread">
                 {messages.length === 0 && (
                   <div className="empty">
