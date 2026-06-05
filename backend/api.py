@@ -11,12 +11,18 @@ Endpoints:
   GET  /admin/stats             — system metrics
   GET  /admin/cache/status
   POST /admin/cache/clear
+  POST /admin/keys              — generate a new API key
+  GET  /admin/keys              — list all API keys
+  DELETE /admin/keys/{id}       — revoke an API key
 
 Changes in this version:
   - [FIX] Streaming endpoint clears sources when LLM returns not-found answer.
   - [FIX] Added _sb_with_retry() wrapper to handle Supabase ConnectionTerminated
     errors by recreating the client and retrying once automatically.
   - [FIX] list_documents, list_conversations, get_session_messages now use retry wrapper.
+  - [AUTH] Added API key authentication on all /api/* endpoints.
+    Keys are stored in the api_keys Supabase table and cached in memory for 60s.
+    Admin endpoints (create/list/revoke keys) require ADMIN_API_KEY env var.
 """
 
 from __future__ import annotations
@@ -25,13 +31,15 @@ import json
 import uuid
 import time as _time
 import logging
+import secrets
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Generator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -67,9 +75,8 @@ def get_sb():
 
 def _sb_with_retry(fn):
     """
-    FIX 3: Retry a Supabase call once with a fresh client if a
-    ConnectionTerminated error is encountered (HTTP/2 error_code:1 or error_code:9).
-    This handles stale connections being reused after Azure/Supabase drops them.
+    Retry a Supabase call once with a fresh client if a ConnectionTerminated
+    error is encountered (HTTP/2 error_code:1 or error_code:9).
     """
     global _sb
     try:
@@ -78,13 +85,70 @@ def _sb_with_retry(fn):
         err_str = str(e)
         if "ConnectionTerminated" in err_str or "error_code:" in err_str:
             log.warning(f"[db] ConnectionTerminated detected — recreating client and retrying: {e}")
-            _sb = None  # force fresh client on next get_sb() call
+            _sb = None
             return fn(get_sb())
         raise
 
 
+# ── API Key authentication ────────────────────────────────────────────────────
+# Keys are stored in the `api_keys` Supabase table and cached in memory for
+# 60 seconds so we don't hit the DB on every single request.
+
+_api_key_cache: set[str] = set()
+_api_key_cache_ts: float = 0.0
+_API_KEY_CACHE_TTL = 60.0  # seconds
+
+_API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _load_api_keys() -> set[str]:
+    """Load active API keys from Supabase, with 60-second in-memory cache."""
+    global _api_key_cache, _api_key_cache_ts
+    now = _time.monotonic()
+    if now - _api_key_cache_ts < _API_KEY_CACHE_TTL and _api_key_cache:
+        return _api_key_cache
+    try:
+        resp = _sb_with_retry(
+            lambda sb: sb.table("api_keys")
+            .select("api_key")
+            .eq("is_active", True)
+            .execute()
+        )
+        keys = {row["api_key"] for row in (resp.data or [])}
+        _api_key_cache = keys
+        _api_key_cache_ts = now
+        log.info(f"[auth] Loaded {len(keys)} active API key(s) from Supabase")
+        return keys
+    except Exception as e:
+        log.warning(f"[auth] Failed to load API keys from Supabase: {e}. Using stale cache.")
+        return _api_key_cache  # return stale cache on DB failure
+
+
+def _require_api_key(key: str = Security(_API_KEY_HEADER)) -> None:
+    """
+    FastAPI dependency — validates X-API-Key header against the api_keys table.
+    If no keys exist in the table yet (initial setup), auth is skipped so you
+    can call /admin/keys to create the first key without being locked out.
+    """
+    valid_keys = _load_api_keys()
+    if not valid_keys:
+        # No keys configured yet — skip auth during initial setup
+        return
+    if not key or key not in valid_keys:
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid or missing API key. Include X-API-Key header."
+        )
+
+
+def _invalidate_key_cache() -> None:
+    """Force the next request to reload keys from Supabase."""
+    global _api_key_cache_ts
+    _api_key_cache_ts = 0.0
+
+
 # ── App setup ─────────────────────────────────────────────────────────────────
-app = FastAPI(title="SAMA NORA Chatbot", version="3.2.2")
+app = FastAPI(title="SAMA NORA Chatbot", version="3.3.0")
 
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000")
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -93,7 +157,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -134,6 +198,10 @@ class FeedbackRequest(BaseModel):
     comments:          str | None = None
     user_message:      str | None = None
     assistant_message: str | None = None
+
+
+class CreateKeyRequest(BaseModel):
+    label: str  # e.g. "ZetaLabs Internal", "Client A"
 
 
 # ── Helper: detect not-found answers ─────────────────────────────────────────
@@ -333,11 +401,11 @@ def _get_session_summary(session_id: str) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "3.2.2"}
+    return {"status": "ok", "version": "3.3.0"}
 
 
 @app.post("/api/query", response_model=QueryResponse)
-def query_endpoint(req: QueryRequest):
+def query_endpoint(req: QueryRequest, _: None = Depends(_require_api_key)):
     if not req.query or not req.query.strip():
         raise HTTPException(status_code=400, detail="query cannot be empty")
 
@@ -368,7 +436,7 @@ def query_endpoint(req: QueryRequest):
 
 
 @app.post("/api/query-stream")
-def query_stream_endpoint(req: QueryRequest):
+def query_stream_endpoint(req: QueryRequest, _: None = Depends(_require_api_key)):
     if not req.query or not req.query.strip():
         raise HTTPException(status_code=400, detail="query cannot be empty")
 
@@ -387,7 +455,6 @@ def query_stream_endpoint(req: QueryRequest):
                 session_summary=session_summary,
             )
 
-            # Track response time and cache stats
             elapsed_ms = (_time.perf_counter() - t_start) * 1000
             _request_times.append(elapsed_ms)
             if len(_request_times) > 50:
@@ -398,13 +465,11 @@ def query_stream_endpoint(req: QueryRequest):
 
             answer = result.get("answer", "")
 
-            # Stream tokens word-by-word
             words = answer.split(" ")
             for i, word in enumerate(words):
                 token = word + (" " if i < len(words) - 1 else "")
                 yield json.dumps({"type": "token", "text": token}) + "\n"
 
-            # Don't send sources if answer is not found
             if _answer_is_not_found(answer):
                 sources_to_send = []
                 log.info(f"[stream] not-found answer — clearing sources for clean UX")
@@ -453,7 +518,7 @@ def query_stream_endpoint(req: QueryRequest):
 
 
 @app.post("/api/feedback")
-def feedback_endpoint(req: FeedbackRequest):
+def feedback_endpoint(req: FeedbackRequest, _: None = Depends(_require_api_key)):
     if req.feedback not in (0, 1):
         raise HTTPException(status_code=400, detail="feedback must be 0 or 1")
 
@@ -478,9 +543,8 @@ def feedback_endpoint(req: FeedbackRequest):
 
 
 @app.get("/api/session/{session_id}/messages")
-def get_session_messages(session_id: str, limit: int = 20):
+def get_session_messages(session_id: str, limit: int = 20, _: None = Depends(_require_api_key)):
     try:
-        # FIX 3: Use retry wrapper for session message fetches
         resp = _sb_with_retry(
             lambda sb: sb.table("session_messages")
             .select("message_id, user_message, assistant_message, timestamp")
@@ -496,12 +560,11 @@ def get_session_messages(session_id: str, limit: int = 20):
 
 
 @app.get("/api/conversations")
-def list_conversations(user_id: str = "", limit: int = 50):
+def list_conversations(user_id: str = "", limit: int = 50, _: None = Depends(_require_api_key)):
     """Return all sessions for a user, sorted newest first, with title = first message."""
     if not user_id:
         return {"conversations": []}
     try:
-        # FIX 3: Use retry wrapper for conversation fetches
         resp = _sb_with_retry(
             lambda sb: sb.table("session_messages")
             .select("session_id, user_message, timestamp")
@@ -538,13 +601,12 @@ def list_conversations(user_id: str = "", limit: int = 50):
 
 
 @app.get("/api/documents")
-def list_documents(search: str = "", limit: int = 20):
+def list_documents(search: str = "", limit: int = 20, _: None = Depends(_require_api_key)):
     """
     Return all documents from the documents table as the source of truth,
     with chunk counts joined from sama_nora_chunks.
     """
     try:
-        # FIX 3: Use retry wrapper for document fetches
         doc_resp = _sb_with_retry(
             lambda sb: sb.table("documents")
             .select("document_name, source_type, total_pages")
@@ -562,9 +624,7 @@ def list_documents(search: str = "", limit: int = 20):
         seen: dict[str, dict] = {}
         for doc in all_docs:
             name = doc.get("document_name", "").strip()
-            if not name:
-                continue
-            if len(name) < 4:
+            if not name or len(name) < 4:
                 continue
             if name not in seen:
                 seen[name] = doc
@@ -584,7 +644,6 @@ def list_documents(search: str = "", limit: int = 20):
             })
 
         results.sort(key=lambda x: x["chunk_count"], reverse=True)
-
         return {"documents": results[:limit], "total": len(results)}
     except Exception as e:
         log.error(f"[documents] list failed: {e}")
@@ -657,10 +716,11 @@ def cache_status():
         count = r.llen("sama:cache:embeddings")
         ttl   = r.ttl("sama:cache:embeddings")
         return {
-            "backend": "redis", "connected": True,
+            "backend":        "redis",
+            "connected":      True,
             "cached_entries": count,
-            "ttl_seconds": ttl,
-            "ttl_days": round(ttl / 86400, 1) if ttl > 0 else "no expiry set",
+            "ttl_seconds":    ttl,
+            "ttl_days":       round(ttl / 86400, 1) if ttl > 0 else "no expiry set",
         }
     except Exception as e:
         return {"backend": "redis", "connected": False, "error": str(e)}
@@ -686,6 +746,92 @@ def cache_clear(api_key: str = ""):
             r.delete(*keys)
         return {"cleared": len(keys), "backend": "redis"}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── API Key management endpoints ──────────────────────────────────────────────
+
+@app.post("/admin/keys")
+def create_api_key(req: CreateKeyRequest, admin_key: str = ""):
+    """
+    Generate a new API key for a client/user.
+    Requires ADMIN_API_KEY in the admin_key query param (if set in env).
+    Example: POST /admin/keys?admin_key=xxx  {"label": "Client A"}
+    Returns the raw key ONCE — store it securely, it cannot be retrieved again.
+    """
+    expected = os.getenv("ADMIN_API_KEY", "")
+    if expected and admin_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+    if not req.label or not req.label.strip():
+        raise HTTPException(status_code=400, detail="label cannot be empty")
+
+    new_key = secrets.token_hex(32)  # 64-char hex string
+    try:
+        result = _sb_with_retry(
+            lambda sb: sb.table("api_keys").insert({
+                "api_key": new_key,
+                "label":   req.label.strip(),
+            }).execute()
+        )
+        row = (result.data or [{}])[0]
+        _invalidate_key_cache()
+        log.info(f"[auth] Created new API key for label='{req.label}'")
+        return {
+            "api_key":    new_key,
+            "id":         row.get("id"),
+            "label":      req.label.strip(),
+            "created_at": row.get("created_at"),
+            "warning":    "Store this key securely. It will not be shown again.",
+        }
+    except Exception as e:
+        log.error(f"[auth] create_api_key failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/keys")
+def list_api_keys(admin_key: str = ""):
+    """
+    List all API keys (labels + status only, raw key values are never returned).
+    Requires ADMIN_API_KEY in the admin_key query param (if set in env).
+    """
+    expected = os.getenv("ADMIN_API_KEY", "")
+    if expected and admin_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+    try:
+        resp = _sb_with_retry(
+            lambda sb: sb.table("api_keys")
+            .select("id, label, is_active, created_at")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return {"keys": resp.data or []}
+    except Exception as e:
+        log.error(f"[auth] list_api_keys failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/admin/keys/{key_id}")
+def revoke_api_key(key_id: str, admin_key: str = ""):
+    """
+    Revoke an API key by its UUID (get UUID from GET /admin/keys).
+    Requires ADMIN_API_KEY in the admin_key query param (if set in env).
+    The key is deactivated, not deleted — audit trail is preserved.
+    """
+    expected = os.getenv("ADMIN_API_KEY", "")
+    if expected and admin_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+    try:
+        _sb_with_retry(
+            lambda sb: sb.table("api_keys")
+            .update({"is_active": False})
+            .eq("id", key_id)
+            .execute()
+        )
+        _invalidate_key_cache()
+        log.info(f"[auth] Revoked API key id={key_id}")
+        return {"status": "revoked", "id": key_id}
+    except Exception as e:
+        log.error(f"[auth] revoke_api_key failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
