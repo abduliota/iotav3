@@ -108,20 +108,36 @@ const readError = async (res: Response, fallback: string) => {
   return body?.detail || fallback;
 };
 
+// API key sent with every request so the backend can validate the caller.
+// Set VITE_API_KEY in your Vercel environment variables.
+const VITE_API_KEY = (import.meta.env.VITE_API_KEY as string | undefined) ?? "";
+
+const authHeaders = (): Record<string, string> => {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (VITE_API_KEY) headers["X-API-Key"] = VITE_API_KEY;
+  return headers;
+};
+
 export const createApiClient = (apiBase: string) => {
   const base = apiBase.replace(/\/$/, "");
   const withBase = (path: string) => `${base}${path}`;
 
   return {
     async fetchHealth() {
-      const res = await fetch(withBase("/health"), { cache: "no-store" });
+      const res = await fetch(withBase("/health"), {
+        cache: "no-store",
+        headers: authHeaders(),
+      });
       if (!res.ok) throw new Error(await readError(res, "Health check failed"));
       const body = await parseJsonSafe<{ status?: string; version?: string }>(res);
       return body ?? {};
     },
 
     async fetchSystemStats() {
-      const res = await fetch(withBase("/admin/stats"), { cache: "no-store" });
+      const res = await fetch(withBase("/admin/stats"), {
+        cache: "no-store",
+        headers: authHeaders(),
+      });
       if (!res.ok) throw new Error(await readError(res, "Failed to load system stats"));
       const body = await parseJsonSafe<SystemStats>(res);
       if (!body) throw new Error("Invalid stats response");
@@ -131,6 +147,7 @@ export const createApiClient = (apiBase: string) => {
     async fetchCacheStatus() {
       const res = await fetch(withBase("/admin/cache/status"), {
         cache: "no-store",
+        headers: authHeaders(),
       });
       if (!res.ok) throw new Error(await readError(res, "Failed to load cache status"));
       const body = await parseJsonSafe<CacheStatus>(res);
@@ -145,7 +162,7 @@ export const createApiClient = (apiBase: string) => {
       const endpoint = query
         ? `${withBase("/api/documents")}?${query}`
         : withBase("/api/documents");
-      const res = await fetch(endpoint);
+      const res = await fetch(endpoint, { headers: authHeaders() });
       if (!res.ok) throw new Error(await readError(res, "Failed to load documents"));
       const body = await parseJsonSafe<DocumentsResponsePayload>(res);
       return body?.documents ?? [];
@@ -154,7 +171,7 @@ export const createApiClient = (apiBase: string) => {
     async queryAnswer(payload: QueryRequestPayload) {
       const res = await fetch(withBase("/api/query"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await readError(res, "Query failed"));
@@ -166,7 +183,7 @@ export const createApiClient = (apiBase: string) => {
     async fetchConversations(userId: string) {
       if (!userId) return [];
       const endpoint = `${withBase("/api/conversations")}?user_id=${encodeURIComponent(userId)}`;
-      const res = await fetch(endpoint);
+      const res = await fetch(endpoint, { headers: authHeaders() });
       if (!res.ok) throw new Error(await readError(res, "Failed to load conversations"));
       const body = await parseJsonSafe<ConversationsResponsePayload>(res);
       return body?.conversations ?? [];
@@ -174,7 +191,8 @@ export const createApiClient = (apiBase: string) => {
 
     async fetchSessionMessages(sessionId: string) {
       const res = await fetch(
-        withBase(`/api/session/${encodeURIComponent(sessionId)}/messages`)
+        withBase(`/api/session/${encodeURIComponent(sessionId)}/messages`),
+        { headers: authHeaders() }
       );
       if (!res.ok) throw new Error(await readError(res, "Failed to load session messages"));
       const body = await parseJsonSafe<SessionMessagesResponsePayload>(res);
@@ -184,7 +202,7 @@ export const createApiClient = (apiBase: string) => {
     async submitFeedback(payload: FeedbackPayload) {
       const res = await fetch(withBase("/api/feedback"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders(),
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await readError(res, "Failed to submit feedback"));
