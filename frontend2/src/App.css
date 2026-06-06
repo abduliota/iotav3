@@ -414,6 +414,8 @@
   overflow-y: auto;
   margin-top: 14px;
   padding-right: 6px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .doc-list li {
@@ -519,6 +521,7 @@
   display: block;
 }
 
+/* ── Chat thread scroll — fixed for all browsers + mobile ────────────────── */
 .chat-thread {
   border: 1px solid #e2e8f0;
   border-radius: 12px;
@@ -527,9 +530,22 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* dvh = dynamic viewport height — shrinks when mobile keyboard opens.
+     svh = smallest viewport height — stable fallback.
+     vh  = legacy fallback for old browsers.
+     CSS cascades: last supported value wins. */
   max-height: 65vh;
+  max-height: 65svh;
+  max-height: 65dvh;
   overflow-y: auto;
+  /* Momentum scrolling on iOS Safari (Chrome on iOS uses WebKit too) */
+  -webkit-overflow-scrolling: touch;
+  /* Smooth scroll for programmatic scrollTop on Chrome, Firefox, Edge, Safari 14+ */
+  scroll-behavior: smooth;
+  /* Prevent scroll from bubbling to the page body on all browsers */
+  overscroll-behavior: contain;
 }
+/* ─────────────────────────────────────────────────────────────────────────── */
 
 .message {
   background: #ffffff;
@@ -636,6 +652,8 @@
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .context-meta {
@@ -682,6 +700,8 @@
   max-height: 300px;
   overflow-y: auto;
   padding-right: 4px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .conversations-rail .conversation-list {
@@ -955,5 +975,24 @@
   .docs-card .doc-list,
   .conversations-card .conversation-list {
     max-height: 320px;
+  }
+
+  /* On small screens, give the chat thread a bit more breathing room
+     and use dvh so the keyboard doesn't crush it */
+  .chat-thread {
+    max-height: 55vh;
+    max-height: 55svh;
+    max-height: 55dvh;
+  }
+
+  /* Larger tap targets for source chips on mobile */
+  .source-chip {
+    padding: 8px 12px;
+  }
+
+  /* Larger tap targets for filter buttons on mobile */
+  .doc-filter-btn {
+    padding: 7px 12px;
+    font-size: 13px;
   }
 }
