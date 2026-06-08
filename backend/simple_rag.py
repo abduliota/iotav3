@@ -32,6 +32,8 @@ Improvements in this version:
   - [FIX v6] Nationality expansions: indian/american/expat → non-GCC non-Saudi natural person
   - [FIX v6] Auto domain anchor: restriction queries without "SAMA" get SAMA EN 1644 injected
   - [FIX v6] Cache hits now have _strip_inline_citations applied before returning
+  - [FIX v7] Added _is_followup() + _contextualize_query() for follow-up handling
+  - [FIX v7] answer_query now accepts last_messages for conversational context
 """
 
 from __future__ import annotations
@@ -254,6 +256,154 @@ def _normalise_informal(query: str) -> str:
     for pattern, replacement in INFORMAL_MAP:
         q = re.sub(pattern, replacement, q, flags=re.IGNORECASE)
     return q
+
+
+
+# ── [FIX v7] Conversational context — follow-up query detection ───────────────
+
+FOLLOWUP_SIGNALS = [
+    "what if", "and if", "what about", "how about",
+    "in that case", "what does that", "what else",
+    "what if they", "does that mean", "in this case",
+    "and what", "so what", "if so", "what if the",
+    "also what", "what about the", "then what",
+    "what happens if", "and if the", "but what",
+    "and does", "and do", "and can", "and would",
+    "and is", "and are", "what if it", "and how",
+]
+
+PRONOUN_STARTS = [
+    "they ", "it ", "this ", "that ", "these ", "those ",
+    "he ", "she ",
+    "هم ", "هي ", "هو ", "ذلك ", "هذا ", "هذه ",
+]
+
+
+def _is_followup(query: str) -> bool:
+    """
+    Detect whether a query is a follow-up that depends on conversation context.
+    Returns True when the query cannot be understood without prior messages.
+
+    Signals:
+      • Starts with a follow-up phrase ("what if", "and if", "how about" …)
+      • Starts with "and", "but", "also", "then", "so"
+      • Starts with a context-dependent pronoun ("it", "they", "this" …)
+      • Very short AND lacks a regulatory anchor keyword
+    """
+    q = query.lower().strip().rstrip("?.")
+
+    if any(q.startswith(s) for s in FOLLOWUP_SIGNALS):
+        return True
+
+    if q.startswith(("and ", "but ", "also ", "then ", "so ")):
+        return True
+
+    if any(q.startswith(p) for p in PRONOUN_STARTS):
+        return True
+
+    # Very short query with no regulatory anchor
+    ANCHOR_TERMS = {
+        "sama", "nca", "aml", "kyc", "pdpl", "ecc", "ccc",
+        "pep", "ubo", "sar", "bank", "account", "basel",
+        "capital", "liquidity", "iso", "fatf", "sme",
+    }
+    words = q.split()
+    if len(words) <= 4 and not any(t in q for t in ANCHOR_TERMS):
+        return True
+
+    return False
+
+
+def _contextualize_query(
+    query: str,
+    session_summary: str,
+    last_messages: list[dict],
+) -> str:
+    """
+    [FIX v7] Rewrite a follow-up question as a complete standalone question
+    using recent conversation history so the RAG retrieval has enough context.
+
+    Example:
+      Prev Q: "What documents does the bank require to open an account?"
+      Prev A: "The bank shall obtain the necessary documents…"
+      Follow-up: "What if the SME is within Saudi and registered in Saudi Arabia?"
+      Rewritten: "What are the bank account opening requirements for an SME
+                  registered and operating within Saudi Arabia?"
+
+    Returns the original query unchanged when:
+      • Query is already standalone (_is_followup returns False)
+      • No context is available
+      • The LLM call fails for any reason
+    """
+    if not _is_followup(query):
+        return query
+
+    # Build context string
+    context_parts: list[str] = []
+
+    if session_summary and session_summary.strip():
+        context_parts.append(f"Conversation topic: {session_summary.strip()}")
+
+    if last_messages:
+        for m in last_messages[-3:]:       # at most last 3 exchanges
+            u = (m.get("user_message") or "").strip()
+            a = (m.get("assistant_message") or "").strip()
+            if u:
+                context_parts.append(f"Previous question: {u}")
+            if a:
+                context_parts.append(f"Previous answer: {a[:400]}")
+
+    if not context_parts:
+        return query                       # no context — use original
+
+    context = "\n".join(context_parts)
+
+    prompt = (
+        "You are helping a Saudi banking and cybersecurity regulatory chatbot "
+        "understand follow-up questions.\n\n"
+        f"Conversation context:\n{context}\n\n"
+        f"Follow-up question: \"{query}\"\n\n"
+        "Rewrite the follow-up as a COMPLETE STANDALONE question about Saudi "
+        "banking or cybersecurity regulations that includes all necessary context "
+        "from the conversation above.\n"
+        "Return ONLY the rewritten question — no explanation, no quotation marks, "
+        "nothing else.\n"
+        "If the question is already standalone and clear, return it unchanged."
+    )
+
+    try:
+        # Try Azure first, then OpenAI, then skip gracefully
+        if LLM_BACKEND == "azure" and AZURE_OPENAI_KEY and AZURE_ENDPOINT:
+            import openai as _oai
+            client = _oai.AzureOpenAI(
+                api_key=AZURE_OPENAI_KEY,
+                azure_endpoint=AZURE_ENDPOINT,
+                api_version="2024-02-01",
+            )
+            model = AZURE_DEPLOYMENT
+        elif OPENAI_API_KEY:
+            import openai as _oai
+            client = _oai.OpenAI(api_key=OPENAI_API_KEY)
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        else:
+            return query                   # no LLM available — skip
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=90,
+            temperature=0.1,
+        )
+        rewritten = resp.choices[0].message.content.strip().strip("\"'")
+        if rewritten and rewritten.lower() != query.lower():
+            print(f"[ctx] Rewritten: '{query}' → '{rewritten}'")
+            return rewritten
+
+    except Exception as e:
+        print(f"[ctx] Contextualize failed (non-fatal): {e}")
+
+    return query                           # fallback to original
+
 
 
 # Issue 5 Fix: yes/no question normalisation
@@ -1162,6 +1312,7 @@ def answer_query(
     on_chunk: Optional[Callable[[str], None]] = None,
     debug: bool = False,
     session_summary: str = "",
+    last_messages: list[dict] | None = None,
     **kwargs,
 ) -> dict:
     if not user_query or not user_query.strip():
@@ -1188,6 +1339,8 @@ def answer_query(
 
     # Issue 1 Fix: normalise informal/abbreviated language first
     query = _normalise_informal(query)
+    # [FIX v7] Rewrite follow-up questions as standalone using conversation context
+    query = _contextualize_query(query, session_summary, last_messages or [])
     # Issue 5 Fix: convert yes/no questions to factual regulatory questions
     query = _normalise_yes_no(query)
     # Normalise meta-phrasing ("what do you know about X" → "what is X")

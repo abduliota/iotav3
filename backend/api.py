@@ -148,7 +148,7 @@ def _invalidate_key_cache() -> None:
 
 
 # ── App setup ─────────────────────────────────────────────────────────────────
-app = FastAPI(title="SAMA NORA Chatbot", version="3.3.0")
+app = FastAPI(title="SAMA NORA Chatbot", version="3.4.0")
 
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000")
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -401,7 +401,7 @@ def _get_session_summary(session_id: str) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "3.3.0"}
+    return {"status": "ok", "version": "3.4.0"}
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -411,12 +411,14 @@ def query_endpoint(req: QueryRequest, _: None = Depends(_require_api_key)):
 
     message_id      = str(uuid.uuid4())
     session_summary = _get_session_summary(req.session_id)
+    last_messages   = _fetch_last_n_messages(req.session_id, n=3) if req.session_id else []
 
     result = answer_query(
         req.query,
         top_k=req.top_k,
         debug=req.debug,
         session_summary=session_summary,
+        last_messages=last_messages,
     )
 
     _persist_interaction(
@@ -447,12 +449,14 @@ def query_stream_endpoint(req: QueryRequest, _: None = Depends(_require_api_key)
         try:
             t_start         = _time.perf_counter()
             session_summary = _get_session_summary(req.session_id)
+            last_messages   = _fetch_last_n_messages(req.session_id, n=3) if req.session_id else []
 
             result = answer_query(
                 req.query,
                 top_k=req.top_k,
                 debug=req.debug,
                 session_summary=session_summary,
+                last_messages=last_messages,
             )
 
             elapsed_ms = (_time.perf_counter() - t_start) * 1000
