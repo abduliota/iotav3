@@ -40,6 +40,8 @@ Improvements in this version:
   - [Step 2] Always includes Arabic variant for cross-lingual retrieval
   - [Step 4] Step-Back Prompting: abstract query merged with specific via RRF
   - [Step 4] Catches general regulatory rules missed by specific queries
+  - [Step 6] Language-Balanced Retrieval: equal Arabic+English per query pool
+  - [Step 6] Prevents English chunk dominance for Arabic regulatory queries
 """
 
 from __future__ import annotations
@@ -72,6 +74,7 @@ CACHE_ENABLED        = os.getenv("CACHE_ENABLED", "true").lower() == "true"
 RAG_FUSION_ENABLED   = os.getenv("RAG_FUSION_ENABLED", "true").lower() == "true"
 RAG_FUSION_VARIANTS  = int(os.getenv("RAG_FUSION_VARIANTS", "3"))
 STEP_BACK_ENABLED    = os.getenv("STEP_BACK_ENABLED", "true").lower() == "true"
+LANG_BALANCED_ENABLED = os.getenv("LANG_BALANCED_ENABLED", "true").lower() == "true"
 CACHE_BACKEND        = os.getenv("CACHE_BACKEND", "memory")
 CACHE_SIM_THRESH     = float(os.getenv("CACHE_SIMILARITY_THRESH", "0.95"))
 CACHE_TTL_SECONDS    = int(os.getenv("CACHE_TTL_SECONDS", "2592000"))
@@ -1351,21 +1354,27 @@ def _generate_step_back_query(query: str) -> Optional[str]:
         print(f'[step_back] Failed (non-fatal): {e}')
         return None
 
-def fetch_chunks(query_vec: list[float], limit: int | None = None) -> list[dict]:
-    resp = _get_supabase().rpc("match_chunks", {
+def fetch_chunks(query_vec: list[float], limit: int | None = None, language_filter: str | None = None) -> list[dict]:
+    rpc = _get_supabase().rpc("match_chunks", {
         "query_embedding": query_vec,
         "match_threshold": SIMILARITY_THRESHOLD,
-        "match_count":     limit or TOP_K,
-    }).execute()
-    return resp.data or []
+        "match_count":     (limit or TOP_K) * (2 if language_filter else 1),
+    })
+    if language_filter:
+        rpc = rpc.eq("language", language_filter)
+    results = rpc.execute().data or []
+    return results[:(limit or TOP_K)]
 
-def fetch_chunks_keyword(query: str, limit: int = 10) -> list[dict]:
+def fetch_chunks_keyword(query: str, limit: int = 10, language_filter: str | None = None) -> list[dict]:
     try:
-        resp = _get_supabase().rpc("keyword_search_chunks", {
+        rpc = _get_supabase().rpc("keyword_search_chunks", {
             "search_query": query,
-            "match_count":  limit,
-        }).execute()
-        results = resp.data or []
+            "match_count":  limit * (2 if language_filter else 1),
+        })
+        if language_filter:
+            rpc = rpc.eq("language", language_filter)
+        results = rpc.execute().data or []
+        results = results[:limit]
         for r in results:
             if "similarity" not in r:
                 r["similarity"] = 0.75
@@ -1374,20 +1383,51 @@ def fetch_chunks_keyword(query: str, limit: int = 10) -> list[dict]:
         print(f"[hybrid] Keyword search unavailable: {e}")
         return []
 
-def fetch_chunks_hybrid(query: str, query_vec: list[float], limit: int = 15, subject: str = "") -> list[dict]:
-    vector_results  = fetch_chunks(query_vec, limit=limit)
+def fetch_chunks_hybrid(query: str, query_vec: list[float], limit: int = 15, subject: str = "", language_filter: str | None = None) -> list[dict]:
+    vector_results  = fetch_chunks(query_vec, limit=limit, language_filter=language_filter)
     keyword_results: list[dict] = []
     if HYBRID_SEARCH:
         # Run keyword search on the full expanded query
-        keyword_results = fetch_chunks_keyword(query, limit=limit)
+        keyword_results = fetch_chunks_keyword(query, limit=limit, language_filter=language_filter)
         # Also run keyword search on the extracted subject if it differs meaningfully
         if subject and subject.lower() != query.lower() and len(subject) >= 3:
-            subject_results = fetch_chunks_keyword(subject, limit=limit)
+            subject_results = fetch_chunks_keyword(subject, limit=limit, language_filter=language_filter)
             # Merge subject results in — dedup happens below
             keyword_results = keyword_results + subject_results
     seen_ids: set = set()
     merged: list[dict] = []
     for chunk in vector_results + keyword_results:
+        cid = chunk.get("id")
+        if cid and cid in seen_ids:
+            continue
+        if cid:
+            seen_ids.add(cid)
+        merged.append(chunk)
+    return merged
+
+
+def fetch_chunks_language_balanced(
+    query: str,
+    query_vec: list[float],
+    limit: int = 15,
+    subject: str = "",
+) -> list[dict]:
+    """
+    [Step 6 - Language-Balanced Retrieval] Fetch equal Arabic and English chunks
+    separately then merge. Prevents English chunk dominance over Arabic content.
+
+    Without: Arabic query might return 8 English + 2 Arabic from top-10
+    With:    Arabic query always returns up to 5 Arabic + 5 English chunks
+    """
+    half = max(limit // 2, 5)
+    ar_chunks = fetch_chunks_hybrid(query, query_vec, limit=half,
+                                    subject=subject, language_filter="ar")
+    en_chunks = fetch_chunks_hybrid(query, query_vec, limit=half,
+                                    subject=subject, language_filter="en")
+    print(f"[lang_balanced] AR={len(ar_chunks)} EN={len(en_chunks)}")
+    seen_ids: set = set()
+    merged: list[dict] = []
+    for chunk in ar_chunks + en_chunks:
         cid = chunk.get("id")
         if cid and cid in seen_ids:
             continue
@@ -1631,6 +1671,12 @@ def answer_query(
     if debug:
         print(f"[pipeline] top_k={final_top_k} → sentences={max_sentences}, tokens={max_tokens}, fetch_k={fetch_k}")
 
+    # Pick fetch strategy based on LANG_BALANCED_ENABLED
+    def _fetch(q, vec, limit, subject=''):
+        if LANG_BALANCED_ENABLED:
+            return fetch_chunks_language_balanced(q, vec, limit=limit, subject=subject)
+        return fetch_chunks_hybrid(q, vec, limit=limit, subject=subject)
+
     # [Step 4 - Step-Back Prompting] Generate abstract query before retrieval
     step_back = None
     if STEP_BACK_ENABLED and len(query.split()) >= 5:
@@ -1645,13 +1691,13 @@ def answer_query(
         for variant in variants:
             v_exp = _inject_domain_anchor(variant, _expand_query(variant))
             v_vec = _embed(v_exp)
-            v_res = fetch_chunks_hybrid(v_exp, v_vec, limit=fetch_k, subject=subject)
+            v_res = _fetch(v_exp, v_vec, limit=fetch_k, subject=subject)
             all_results.append(v_res)
         # Add step-back abstract results to the pool
         if step_back:
             sb_exp = _inject_domain_anchor(step_back, _expand_query(step_back))
             sb_vec = _embed(sb_exp)
-            sb_res = fetch_chunks_hybrid(sb_exp, sb_vec, limit=fetch_k, subject=subject)
+            sb_res = _fetch(sb_exp, sb_vec, limit=fetch_k, subject=subject)
             all_results.append(sb_res)
         candidates = _reciprocal_rank_fusion(all_results)[:fetch_k]
         if debug:
@@ -1659,13 +1705,13 @@ def answer_query(
             print(f'[pipeline] {n} query pools -> {len(candidates)} RRF-merged candidates')
     elif step_back:
         # RAG-Fusion off but step-back on — merge original + abstract
-        orig_res = fetch_chunks_hybrid(expanded, query_vec, limit=fetch_k, subject=subject)
+        orig_res = _fetch(expanded, query_vec, limit=fetch_k, subject=subject)
         sb_exp   = _inject_domain_anchor(step_back, _expand_query(step_back))
         sb_vec   = _embed(sb_exp)
-        sb_res   = fetch_chunks_hybrid(sb_exp, sb_vec, limit=fetch_k, subject=subject)
+        sb_res   = _fetch(sb_exp, sb_vec, limit=fetch_k, subject=subject)
         candidates = _reciprocal_rank_fusion([orig_res, sb_res])[:fetch_k]
     else:
-        candidates  = fetch_chunks_hybrid(expanded, query_vec, limit=fetch_k, subject=subject)
+        candidates  = _fetch(expanded, query_vec, limit=fetch_k, subject=subject)
 
     if debug:
         print(f"\n[pipeline] {len(candidates)} hybrid candidates for: '{query}'")
