@@ -38,6 +38,8 @@ Improvements in this version:
   - [FIX v8] Added META_QUESTIONS guard in _is_followup() for greetings/conversational
   - [Step 2] RAG-Fusion: LLM generates query variants, results merged via RRF
   - [Step 2] Always includes Arabic variant for cross-lingual retrieval
+  - [Step 4] Step-Back Prompting: abstract query merged with specific via RRF
+  - [Step 4] Catches general regulatory rules missed by specific queries
 """
 
 from __future__ import annotations
@@ -69,6 +71,7 @@ AZURE_DEPLOYMENT     = os.getenv("AZURE_DEPLOYMENT", "gpt-4o")
 CACHE_ENABLED        = os.getenv("CACHE_ENABLED", "true").lower() == "true"
 RAG_FUSION_ENABLED   = os.getenv("RAG_FUSION_ENABLED", "true").lower() == "true"
 RAG_FUSION_VARIANTS  = int(os.getenv("RAG_FUSION_VARIANTS", "3"))
+STEP_BACK_ENABLED    = os.getenv("STEP_BACK_ENABLED", "true").lower() == "true"
 CACHE_BACKEND        = os.getenv("CACHE_BACKEND", "memory")
 CACHE_SIM_THRESH     = float(os.getenv("CACHE_SIMILARITY_THRESH", "0.95"))
 CACHE_TTL_SECONDS    = int(os.getenv("CACHE_TTL_SECONDS", "2592000"))
@@ -1077,8 +1080,8 @@ def _get_reranker():
     if _reranker is None:
         try:
             from sentence_transformers import CrossEncoder
-            print("[reranker] Loading BAAI/bge-reranker-base ...")
-            _reranker = CrossEncoder("BAAI/bge-reranker-base")
+            print("[reranker] Loading BAAI/bge-reranker-v2-m3 ...")
+            _reranker = CrossEncoder("BAAI/bge-reranker-v2-m3")
             print("[reranker] Loaded.")
         except Exception as e:
             print(f"[reranker] WARNING: Could not load reranker: {e}. Falling back to vector-only.")
@@ -1269,6 +1272,84 @@ def _reciprocal_rank_fusion(
         merged.append(chunk)
 
     return merged
+
+
+# -- [Step 4 - Step-Back Prompting] Abstract query generation ----------------
+
+_STEP_BACK_EXAMPLES = (
+    "Specific: What documents does an SME need to open a bank account?\n"
+    "Abstract: What are SAMA account opening requirements for business entities?\n\n"
+    "Specific: What is the minimum capital adequacy ratio for Saudi banks?\n"
+    "Abstract: What are Basel III capital requirements under SAMA regulations?\n\n"
+    "Specific: Can a politically exposed person open a bank account in Saudi Arabia?\n"
+    "Abstract: What are SAMA KYC and due diligence requirements for high-risk customers?\n\n"
+    "Specific: \u0645\u0627 \u0647\u064a \u0645\u062a\u0637\u0644\u0628\u0627\u062a \u0641\u062a\u062d \u062d\u0633\u0627\u0628 \u0644\u0644\u0645\u0646\u0634\u0622\u062a \u0627\u0644\u0635\u063a\u064a\u0631\u0629 \u0648\u0627\u0644\u0645\u062a\u0648\u0633\u0637\u0629\u061f\n"
+    "Abstract: \u0645\u0627 \u0647\u064a \u0645\u062a\u0637\u0644\u0628\u0627\u062a \u0633\u0627\u0645\u0627 \u0644\u0641\u062a\u062d \u0627\u0644\u062d\u0633\u0627\u0628\u0627\u062a \u0627\u0644\u0628\u0646\u0643\u064a\u0629 \u0644\u0644\u0634\u0631\u0643\u0627\u062a\u061f\n"
+)
+
+
+def _generate_step_back_query(query: str) -> Optional[str]:
+    """
+    [Step 4 - Step-Back Prompting] Generate an abstract version of the query
+    that captures the underlying regulatory principle.
+
+    Example:
+      Specific: "What documents does an SME need to open a bank account?"
+      Abstract: "What are SAMA account opening requirements for business entities?"
+
+    The abstract query is searched alongside the original and variants.
+    Results merged via RRF so reranker sees both specific and general context.
+    Falls back to None on any failure. Set STEP_BACK_ENABLED=false to disable.
+    """
+    if not STEP_BACK_ENABLED:
+        return None
+    if len(query.split()) < 5:
+        return None
+
+    prompt = (
+        "You are a Saudi banking and cybersecurity regulation expert.\n\n"
+        "Given a specific regulatory question, write a MORE GENERAL version that captures "
+        "the underlying regulatory principle or framework being asked about.\n\n"
+        "Rules:\n"
+        "- Abstract to the regulatory principle, not the specific detail\n"
+        "- Stay in the same language as the input question\n"
+        "- Return ONLY the abstract question, maximum 20 words, no explanation\n\n"
+        "Examples:\n"
+        + _STEP_BACK_EXAMPLES +
+        f"Specific: {query}\nAbstract:"
+    )
+
+    try:
+        if LLM_BACKEND == 'azure' and AZURE_OPENAI_KEY and AZURE_ENDPOINT:
+            import openai as _oai
+            client = _oai.AzureOpenAI(
+                api_key=AZURE_OPENAI_KEY,
+                azure_endpoint=AZURE_ENDPOINT,
+                api_version="2024-02-01",
+            )
+            model = AZURE_DEPLOYMENT
+        elif OPENAI_API_KEY:
+            import openai as _oai
+            client = _oai.OpenAI(api_key=OPENAI_API_KEY)
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        else:
+            return None
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{'role': 'user', 'content': prompt}],
+            max_tokens=50,
+            temperature=0.1,
+        )
+        abstract = resp.choices[0].message.content.strip().strip('"\' ')
+        if abstract and len(abstract.split()) >= 3 and abstract.lower() != query.lower():
+            print(f"[step_back] '{query[:50]}' -> '{abstract}'")
+            return abstract
+        return None
+
+    except Exception as e:
+        print(f'[step_back] Failed (non-fatal): {e}')
+        return None
 
 def fetch_chunks(query_vec: list[float], limit: int | None = None) -> list[dict]:
     resp = _get_supabase().rpc("match_chunks", {
@@ -1550,8 +1631,15 @@ def answer_query(
     if debug:
         print(f"[pipeline] top_k={final_top_k} → sentences={max_sentences}, tokens={max_tokens}, fetch_k={fetch_k}")
 
-    # [Step 2 — RAG-Fusion] Multi-query retrieval + RRF merge
-    if RAG_FUSION_ENABLED and len(query.split()) >= 5:
+    # [Step 4 - Step-Back Prompting] Generate abstract query before retrieval
+    step_back = None
+    if STEP_BACK_ENABLED and len(query.split()) >= 5:
+        step_back = _generate_step_back_query(query)
+
+    # [Step 2 - RAG-Fusion] Multi-query retrieval + RRF merge
+    # Step-back result added as extra pool in RRF
+    long_enough = len(query.split()) >= 5
+    if RAG_FUSION_ENABLED and long_enough:
         variants    = _generate_query_variants(query)
         all_results = []
         for variant in variants:
@@ -1559,9 +1647,23 @@ def answer_query(
             v_vec = _embed(v_exp)
             v_res = fetch_chunks_hybrid(v_exp, v_vec, limit=fetch_k, subject=subject)
             all_results.append(v_res)
+        # Add step-back abstract results to the pool
+        if step_back:
+            sb_exp = _inject_domain_anchor(step_back, _expand_query(step_back))
+            sb_vec = _embed(sb_exp)
+            sb_res = fetch_chunks_hybrid(sb_exp, sb_vec, limit=fetch_k, subject=subject)
+            all_results.append(sb_res)
         candidates = _reciprocal_rank_fusion(all_results)[:fetch_k]
         if debug:
-            print(f"[rag_fusion] {len(variants)} variants → {len(candidates)} merged candidates (RRF)")
+            n = len(variants) + (1 if step_back else 0)
+            print(f'[pipeline] {n} query pools -> {len(candidates)} RRF-merged candidates')
+    elif step_back:
+        # RAG-Fusion off but step-back on — merge original + abstract
+        orig_res = fetch_chunks_hybrid(expanded, query_vec, limit=fetch_k, subject=subject)
+        sb_exp   = _inject_domain_anchor(step_back, _expand_query(step_back))
+        sb_vec   = _embed(sb_exp)
+        sb_res   = fetch_chunks_hybrid(sb_exp, sb_vec, limit=fetch_k, subject=subject)
+        candidates = _reciprocal_rank_fusion([orig_res, sb_res])[:fetch_k]
     else:
         candidates  = fetch_chunks_hybrid(expanded, query_vec, limit=fetch_k, subject=subject)
 
