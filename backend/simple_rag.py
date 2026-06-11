@@ -34,6 +34,10 @@ Improvements in this version:
   - [FIX v6] Cache hits now have _strip_inline_citations applied before returning
   - [FIX v7] Added _is_followup() + _contextualize_query() for follow-up handling
   - [FIX v7] answer_query now accepts last_messages for conversational context
+  - [FIX v8] Added IDENTITY_RESPONSE + _is_identity_question() for self-identification
+  - [FIX v8] Added META_QUESTIONS guard in _is_followup() for greetings/conversational
+  - [Step 2] RAG-Fusion: LLM generates query variants, results merged via RRF
+  - [Step 2] Always includes Arabic variant for cross-lingual retrieval
 """
 
 from __future__ import annotations
@@ -63,6 +67,8 @@ AZURE_ENDPOINT       = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_DEPLOYMENT     = os.getenv("AZURE_DEPLOYMENT", "gpt-4o")
 
 CACHE_ENABLED        = os.getenv("CACHE_ENABLED", "true").lower() == "true"
+RAG_FUSION_ENABLED   = os.getenv("RAG_FUSION_ENABLED", "true").lower() == "true"
+RAG_FUSION_VARIANTS  = int(os.getenv("RAG_FUSION_VARIANTS", "3"))
 CACHE_BACKEND        = os.getenv("CACHE_BACKEND", "memory")
 CACHE_SIM_THRESH     = float(os.getenv("CACHE_SIMILARITY_THRESH", "0.95"))
 CACHE_TTL_SECONDS    = int(os.getenv("CACHE_TTL_SECONDS", "2592000"))
@@ -189,6 +195,14 @@ OUT_OF_SCOPE_PATTERNS = [
     r"who is the ceo of", r"who is the founder of", r"who invented",
     r"\bnetflix\b", r"\bgoogle\b", r"\bamazon\b", r"\bmicrosoft\b",
     r"\bapple inc\b", r"\bfacebook\b", r"\btwitter\b",
+    # ── Conversational / greeting inputs ──────────────────────────────────────
+    r"^are (we|you) ready",
+    r"^(hello|hi|hey)\b",
+    r"^(okay|ok|thanks|thank you|got it|sounds good)\b",
+    r"^(great|nice|cool|awesome|perfect|noted|understood)\b",
+    r"^(yes|no|yep|nope|sure|alright)\b",
+    r"^(start|begin|go ahead|continue|proceed)\b",
+    r"^(let's go|lets go|ready|done|finish)\b",
 ]
 
 def _is_out_of_scope(query: str) -> bool:
@@ -215,6 +229,47 @@ def _is_nora_definition_query(query: str) -> bool:
         return any(m in query for m in arabic_markers) or query.strip() == "نورا"
     return False
 
+
+
+
+# ── Identity / self-description ───────────────────────────────────────────────
+
+IDENTITY_RESPONSE = (
+    "I am IOTA AI, an AI regulatory assistant built by IOTA Technologies. "
+    "I specialise in Saudi Arabian banking, cybersecurity, and data protection regulations — "
+    "including SAMA frameworks, NCA controls, and PDPL. "
+    "Ask me anything about regulatory compliance in the Kingdom."
+)
+
+IDENTITY_RESPONSE_AR = (
+    "أنا IOTA AI، مساعد ذكاء اصطناعي تنظيمي طوّرته شركة IOTA Technologies. "
+    "أتخصص في لوائح البنوك السعودية والأمن السيبراني وحماية البيانات، "
+    "بما في ذلك أطر ساما وضوابط الهيئة الوطنية للأمن السيبراني ونظام حماية البيانات الشخصية. "
+    "اسألني عن أي شيء يتعلق بالامتثال التنظيمي في المملكة."
+)
+
+IDENTITY_PATTERNS = [
+    r"^who are you",
+    r"^what are you",
+    r"^what is your name",
+    r"^tell me about yourself",
+    r"^are you (a|an) (ai|bot|robot|human|assistant)",
+    r"^what do you do",
+    r"^how (old|smart) are you",
+    r"^do you (know|think|understand|feel)",
+    r"^you are (a|an)",
+    r"^introduce yourself",
+    r"^من أنت",
+    r"^ما اسمك",
+    r"^عرّف نفسك",
+    r"^ما هو دورك",
+]
+
+
+def _is_identity_question(query: str) -> bool:
+    """Return True if the query is asking about the agent's identity."""
+    q = query.strip().lower().rstrip("?.")
+    return any(re.match(p, q) for p in IDENTITY_PATTERNS)
 
 # ── Query normalisation ───────────────────────────────────────────────────────
 
@@ -291,6 +346,20 @@ def _is_followup(query: str) -> bool:
       • Very short AND lacks a regulatory anchor keyword
     """
     q = query.lower().strip().rstrip("?.")
+
+    # Never treat identity/greeting/meta questions as follow-ups
+    META_QUESTIONS = [
+        "who are you", "what are you", "what is your name",
+        "what can you do", "are you an ai", "are you a bot",
+        "tell me about yourself", "how are you", "what do you do",
+        "introduce yourself", "are we ready", "are you ready",
+        "hello", "hi", "hey", "okay", "ok", "thanks", "thank you",
+        "got it", "sounds good", "great", "nice", "cool", "awesome",
+        "let's go", "lets go", "start", "begin", "go ahead",
+        "من أنت", "ما اسمك", "عرّف نفسك",
+    ]
+    if any(q == m or q.startswith(m) for m in META_QUESTIONS):
+        return False
 
     if any(q.startswith(s) for s in FOLLOWUP_SIGNALS):
         return True
@@ -1095,6 +1164,112 @@ def _cache_store(vec: list[float], result: dict) -> None:
     else:
         _mem_cache.append({"embedding": vec, "result": result})
 
+
+
+# ── [Step 2 — RAG-Fusion] Multi-query retrieval with Reciprocal Rank Fusion ───
+
+def _generate_query_variants(query: str) -> list[str]:
+    """
+    Generate query variants for RAG-Fusion multi-query retrieval.
+    Returns [original_query] + LLM-generated variants.
+    Always includes 1 Arabic variant (English query) or 1 English variant (Arabic query).
+    Falls back to [original_query] on any failure — pipeline continues normally.
+    """
+    if not RAG_FUSION_ENABLED:
+        return [query]
+
+    # Short queries don't benefit from multi-query
+    if len(query.split()) < 5:
+        return [query]
+
+    is_arabic_q = _is_arabic(query)
+    lang_instruction = (
+        "Include 1 variant in English."
+        if is_arabic_q else
+        "Include 1 variant in Arabic (translating the regulatory concepts)."
+    )
+
+    prompt = (
+        "You are a Saudi banking and cybersecurity regulation expert.\n"
+        f"Generate {RAG_FUSION_VARIANTS} different phrasings of this regulatory question.\n"
+        f"{lang_instruction}\n"
+        "Return ONLY the phrasings, one per line, no numbering, no explanation.\n"
+        f"Question: {query}"
+    )
+
+    try:
+        if LLM_BACKEND == "azure" and AZURE_OPENAI_KEY and AZURE_ENDPOINT:
+            import openai as _oai
+            client = _oai.AzureOpenAI(
+                api_key=AZURE_OPENAI_KEY,
+                azure_endpoint=AZURE_ENDPOINT,
+                api_version="2024-02-01",
+            )
+            model = AZURE_DEPLOYMENT
+        elif OPENAI_API_KEY:
+            import openai as _oai
+            client = _oai.OpenAI(api_key=OPENAI_API_KEY)
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        else:
+            return [query]
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.3,
+        )
+        raw      = resp.choices[0].message.content.strip()
+        variants = [v.strip() for v in raw.split("\n") if v.strip() and len(v.strip()) > 5]
+
+        all_queries = [query]
+        for v in variants[:RAG_FUSION_VARIANTS]:
+            if v.lower() != query.lower():
+                all_queries.append(v)
+
+        print(f"[rag_fusion] {len(all_queries)-1} variants generated for: '{query[:60]}'")
+        return all_queries
+
+    except Exception as e:
+        print(f"[rag_fusion] Variant generation failed (non-fatal): {e}")
+        return [query]
+
+
+def _reciprocal_rank_fusion(
+    results_list: list[list[dict]],
+    k: int = 60,
+) -> list[dict]:
+    """
+    Merge multiple ranked chunk lists using Reciprocal Rank Fusion (RRF).
+    Score = sum(1 / (k + rank)) across all query variant result lists.
+    Chunks appearing highly ranked in multiple lists score highest.
+    k=60 is the standard constant from the original RRF paper.
+    """
+    scores:    dict[str, float] = {}
+    chunk_map: dict[str, dict]  = {}
+
+    for results in results_list:
+        for rank, chunk in enumerate(results, 1):
+            cid = chunk.get("id", "")
+            if not cid:
+                # Fallback ID for chunks without UUID
+                cid = f"{chunk.get('document_name','')}_{chunk.get('page_start','')}_{rank}"
+
+            scores[cid]    = scores.get(cid, 0.0) + 1.0 / (k + rank)
+            chunk_map[cid] = chunk_map.get(cid, chunk)
+
+    # Sort by RRF score descending
+    sorted_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)
+
+    merged = []
+    for cid in sorted_ids:
+        chunk = chunk_map[cid].copy()
+        # Use RRF score as similarity proxy for downstream compatibility
+        chunk["similarity"] = round(scores[cid], 6)
+        merged.append(chunk)
+
+    return merged
+
 def fetch_chunks(query_vec: list[float], limit: int | None = None) -> list[dict]:
     resp = _get_supabase().rpc("match_chunks", {
         "query_embedding": query_vec,
@@ -1320,6 +1495,11 @@ def answer_query(
 
     query = user_query.strip()
 
+    if _is_identity_question(query):
+        resp = IDENTITY_RESPONSE_AR if _is_arabic(query) else IDENTITY_RESPONSE
+        if on_chunk: on_chunk(resp)
+        return {"answer": resp, "sources": [], "cached": False, "method": "identity"}
+
     if _is_nora_definition_query(query):
         if on_chunk:
             on_chunk(NORA_FALLBACK)
@@ -1370,7 +1550,20 @@ def answer_query(
     if debug:
         print(f"[pipeline] top_k={final_top_k} → sentences={max_sentences}, tokens={max_tokens}, fetch_k={fetch_k}")
 
-    candidates  = fetch_chunks_hybrid(expanded, query_vec, limit=fetch_k, subject=subject)
+    # [Step 2 — RAG-Fusion] Multi-query retrieval + RRF merge
+    if RAG_FUSION_ENABLED and len(query.split()) >= 5:
+        variants    = _generate_query_variants(query)
+        all_results = []
+        for variant in variants:
+            v_exp = _inject_domain_anchor(variant, _expand_query(variant))
+            v_vec = _embed(v_exp)
+            v_res = fetch_chunks_hybrid(v_exp, v_vec, limit=fetch_k, subject=subject)
+            all_results.append(v_res)
+        candidates = _reciprocal_rank_fusion(all_results)[:fetch_k]
+        if debug:
+            print(f"[rag_fusion] {len(variants)} variants → {len(candidates)} merged candidates (RRF)")
+    else:
+        candidates  = fetch_chunks_hybrid(expanded, query_vec, limit=fetch_k, subject=subject)
 
     if debug:
         print(f"\n[pipeline] {len(candidates)} hybrid candidates for: '{query}'")
