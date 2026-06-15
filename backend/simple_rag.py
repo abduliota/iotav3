@@ -42,6 +42,8 @@ Improvements in this version:
   - [Step 4] Catches general regulatory rules missed by specific queries
   - [Step 6] Language-Balanced Retrieval: equal Arabic+English per query pool
   - [Step 6] Prevents English chunk dominance for Arabic regulatory queries
+  - [Step 5] BGE-M3 parallel column: USE_BGE_COLUMN=true switches to 1024-dim
+  - [Step 5] Zero downtime upgrade — old e5-small pipeline preserved as fallback
 """
 
 from __future__ import annotations
@@ -75,6 +77,7 @@ RAG_FUSION_ENABLED   = os.getenv("RAG_FUSION_ENABLED", "true").lower() == "true"
 RAG_FUSION_VARIANTS  = int(os.getenv("RAG_FUSION_VARIANTS", "3"))
 STEP_BACK_ENABLED    = os.getenv("STEP_BACK_ENABLED", "true").lower() == "true"
 LANG_BALANCED_ENABLED = os.getenv("LANG_BALANCED_ENABLED", "true").lower() == "true"
+USE_BGE_COLUMN        = os.getenv("USE_BGE_COLUMN", "false").lower() == "true"
 CACHE_BACKEND        = os.getenv("CACHE_BACKEND", "memory")
 CACHE_SIM_THRESH     = float(os.getenv("CACHE_SIMILARITY_THRESH", "0.95"))
 CACHE_TTL_SECONDS    = int(os.getenv("CACHE_TTL_SECONDS", "2592000"))
@@ -1355,7 +1358,9 @@ def _generate_step_back_query(query: str) -> Optional[str]:
         return None
 
 def fetch_chunks(query_vec: list[float], limit: int | None = None, language_filter: str | None = None) -> list[dict]:
-    rpc = _get_supabase().rpc("match_chunks", {
+    # [Step 5] Switch RPC based on which embedding column is active
+    rpc_name = "match_chunks_bge" if USE_BGE_COLUMN else "match_chunks"
+    rpc = _get_supabase().rpc(rpc_name, {
         "query_embedding": query_vec,
         "match_threshold": SIMILARITY_THRESHOLD,
         "match_count":     (limit or TOP_K) * (2 if language_filter else 1),
