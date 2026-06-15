@@ -1139,7 +1139,12 @@ def _cache_lookup(vec: list[float]) -> dict | None:
             q = np.array(vec)
             best_idx, best_sim = -1, 0.0
             for i, raw in enumerate(raw_list):
-                sim = float(np.dot(q, np.array(json.loads(raw))))
+                cached_vec = np.array(json.loads(raw))
+                if cached_vec.shape != q.shape:
+                    # Dimension mismatch — embedding model changed; skip cache
+                    print(f"[cache] Dimension mismatch ({cached_vec.shape} vs {q.shape}) — cache miss")
+                    break
+                sim = float(np.dot(q, cached_vec))
                 if sim > best_sim:
                     best_sim, best_idx = sim, i
             if best_sim >= CACHE_SIM_THRESH and best_idx >= 0:
@@ -1689,7 +1694,11 @@ def answer_query(
 
     # [Step 2 - RAG-Fusion] Multi-query retrieval + RRF merge
     # Step-back result added as extra pool in RRF
-    long_enough = len(query.split()) >= 5
+    # NOTE: track max_raw_sim from raw results BEFORE RRF overwrites similarity
+    #       with tiny RRF scores — needed for LOW_CONF_THRESHOLD check below
+    long_enough  = len(query.split()) >= 5
+    max_raw_sim  = 0.0   # will be set from raw retrieval results
+
     if RAG_FUSION_ENABLED and long_enough:
         variants    = _generate_query_variants(query)
         all_results = []
@@ -1698,16 +1707,22 @@ def answer_query(
             v_vec = _embed(v_exp)
             v_res = _fetch(v_exp, v_vec, limit=fetch_k, subject=subject)
             all_results.append(v_res)
+            if v_res:
+                max_raw_sim = max(max_raw_sim,
+                    max(float(c.get("similarity", 0)) for c in v_res))
         # Add step-back abstract results to the pool
         if step_back:
             sb_exp = _inject_domain_anchor(step_back, _expand_query(step_back))
             sb_vec = _embed(sb_exp)
             sb_res = _fetch(sb_exp, sb_vec, limit=fetch_k, subject=subject)
             all_results.append(sb_res)
+            if sb_res:
+                max_raw_sim = max(max_raw_sim,
+                    max(float(c.get("similarity", 0)) for c in sb_res))
         candidates = _reciprocal_rank_fusion(all_results)[:fetch_k]
         if debug:
             n = len(variants) + (1 if step_back else 0)
-            print(f'[pipeline] {n} query pools -> {len(candidates)} RRF-merged candidates')
+            print(f'[pipeline] {n} query pools -> {len(candidates)} RRF-merged candidates | raw_sim={max_raw_sim:.4f}')
     elif step_back:
         # RAG-Fusion off but step-back on — merge original + abstract
         orig_res = _fetch(expanded, query_vec, limit=fetch_k, subject=subject)
@@ -1715,8 +1730,11 @@ def answer_query(
         sb_vec   = _embed(sb_exp)
         sb_res   = _fetch(sb_exp, sb_vec, limit=fetch_k, subject=subject)
         candidates = _reciprocal_rank_fusion([orig_res, sb_res])[:fetch_k]
+        all_raw = orig_res + sb_res
+        max_raw_sim = max((float(c.get("similarity", 0)) for c in all_raw), default=0.0)
     else:
         candidates  = _fetch(expanded, query_vec, limit=fetch_k, subject=subject)
+        max_raw_sim = max((float(c.get("similarity", 0)) for c in candidates), default=0.0)
 
     if debug:
         print(f"\n[pipeline] {len(candidates)} hybrid candidates for: '{query}'")
@@ -1730,7 +1748,13 @@ def answer_query(
         return {"answer": NOT_FOUND, "sources": [], "cached": False, "method": "not_found"}
 
     chunks, reranker_top_score = rerank_chunks(query, candidates, top_n=final_top_k)
-    top_sim = max(float(c.get("similarity", 0)) for c in candidates)
+
+    # Use max_raw_sim (pre-RRF cosine similarity) for confidence check.
+    # RRF scores (~0.016) are not comparable to LOW_CONF_THRESHOLD (~0.72).
+    # Fall back to candidates similarity when RAG-Fusion was not used.
+    top_sim = max_raw_sim if max_raw_sim > 0 else max(
+        float(c.get("similarity", 0)) for c in candidates
+    )
 
     if top_sim < LOW_CONF_THRESHOLD:
         if debug: print(f"[pipeline] low confidence ({top_sim:.4f} < {LOW_CONF_THRESHOLD})")
@@ -1784,4 +1808,4 @@ def format_response_for_display(user_query: str, result: dict) -> str:
     else:
         for i, s in enumerate(sources, 1):
             lines.append(f"  {i}. {s.get('document_name','')} (pages {s.get('page_start','?')}-{s.get('page_end','?')}) sim={s.get('similarity',0)}")
-    return "\n".join(lines) 
+    return "\n".join(lines)
