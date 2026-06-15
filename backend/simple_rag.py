@@ -1784,4 +1784,4 @@ def format_response_for_display(user_query: str, result: dict) -> str:
     else:
         for i, s in enumerate(sources, 1):
             lines.append(f"  {i}. {s.get('document_name','')} (pages {s.get('page_start','?')}-{s.get('page_end','?')}) sim={s.get('similarity',0)}")
-    return "\n".join(lines)
+    return "\n".join(lines) 
