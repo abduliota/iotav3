@@ -1076,9 +1076,12 @@ def _get_supabase():
 def _get_embedder():
     global _embedder
     if _embedder is None:
+        import torch
         from sentence_transformers import SentenceTransformer
-        print(f"[embedder] Loading {EMBEDDING_MODEL}...")
-        _embedder = SentenceTransformer(EMBEDDING_MODEL)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[embedder] Loading {EMBEDDING_MODEL} on {device.upper()}...")
+        _embedder = SentenceTransformer(EMBEDDING_MODEL, device=device)
+        print(f"[embedder] Ready on {device.upper()}.")
     return _embedder
 
 def _get_reranker():
