@@ -1488,7 +1488,8 @@ def _user_prompt(context_text: str, query: str, session_summary: str = "", max_s
         )
     else:
         instruction = (
-            f"Answer in up to {max_sentences} clean natural sentences. "
+            f"Answer in ENGLISH in up to {max_sentences} clean natural sentences. "
+            "Even if the context passages are in Arabic, your answer must be in English. "
             "Do NOT include any document names, file names, page numbers, or parenthetical source references in the answer text."
         )
     return f"{summary_block}<context>\n{context_text}\n</context>\n\nQuestion: {query}\n\n{instruction}\n\nAnswer:"
