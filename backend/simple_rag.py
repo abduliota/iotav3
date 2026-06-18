@@ -75,6 +75,7 @@ SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.5"))
 SNIPPET_CHAR_LIMIT   = int(os.getenv("SNIPPET_CHAR_LIMIT", "1000"))
 LOW_CONF_THRESHOLD   = float(os.getenv("LOW_CONF_THRESHOLD", "0.72"))
 RERANKER_ENABLED     = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
+RERANKER_MODEL       = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 HYBRID_SEARCH        = os.getenv("HYBRID_SEARCH", "true").lower() == "true"
 
 LLM_BACKEND          = os.getenv("LLM_BACKEND", "qwen")
@@ -1110,8 +1111,8 @@ def _get_reranker():
     if _reranker is None:
         try:
             from sentence_transformers import CrossEncoder
-            print("[reranker] Loading BAAI/bge-reranker-v2-m3 ...")
-            _reranker = CrossEncoder("BAAI/bge-reranker-v2-m3")
+            print(f"[reranker] Loading {RERANKER_MODEL} ...")
+            _reranker = CrossEncoder(RERANKER_MODEL)
             print("[reranker] Loaded.")
         except Exception as e:
             print(f"[reranker] WARNING: Could not load reranker: {e}. Falling back to vector-only.")
