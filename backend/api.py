@@ -23,6 +23,9 @@ Changes in this version:
   - [AUTH] Added API key authentication on all /api/* endpoints.
     Keys are stored in the api_keys Supabase table and cached in memory for 60s.
     Admin endpoints (create/list/revoke keys) require ADMIN_API_KEY env var.
+  - [FIX] Preload embedder + reranker at startup in main thread — fixes CUDA
+    initialization crash on Windows when models load inside a thread pool.
+  - [FIX] admin/stats and admin/cache/status updated to use v2 hash-based cache keys.
 """
 
 from __future__ import annotations
@@ -74,10 +77,6 @@ def get_sb():
 
 
 def _sb_with_retry(fn):
-    """
-    Retry a Supabase call once with a fresh client if a ConnectionTerminated
-    error is encountered (HTTP/2 error_code:1 or error_code:9).
-    """
     global _sb
     try:
         return fn(get_sb())
@@ -91,18 +90,14 @@ def _sb_with_retry(fn):
 
 
 # ── API Key authentication ────────────────────────────────────────────────────
-# Keys are stored in the `api_keys` Supabase table and cached in memory for
-# 60 seconds so we don't hit the DB on every single request.
-
 _api_key_cache: set[str] = set()
 _api_key_cache_ts: float = 0.0
-_API_KEY_CACHE_TTL = 60.0  # seconds
+_API_KEY_CACHE_TTL = 60.0
 
 _API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def _load_api_keys() -> set[str]:
-    """Load active API keys from Supabase, with 60-second in-memory cache."""
     global _api_key_cache, _api_key_cache_ts
     now = _time.monotonic()
     if now - _api_key_cache_ts < _API_KEY_CACHE_TTL and _api_key_cache:
@@ -121,18 +116,12 @@ def _load_api_keys() -> set[str]:
         return keys
     except Exception as e:
         log.warning(f"[auth] Failed to load API keys from Supabase: {e}. Using stale cache.")
-        return _api_key_cache  # return stale cache on DB failure
+        return _api_key_cache
 
 
 def _require_api_key(key: str = Security(_API_KEY_HEADER)) -> None:
-    """
-    FastAPI dependency — validates X-API-Key header against the api_keys table.
-    If no keys exist in the table yet (initial setup), auth is skipped so you
-    can call /admin/keys to create the first key without being locked out.
-    """
     valid_keys = _load_api_keys()
     if not valid_keys:
-        # No keys configured yet — skip auth during initial setup
         return
     if not key or key not in valid_keys:
         raise HTTPException(
@@ -142,13 +131,12 @@ def _require_api_key(key: str = Security(_API_KEY_HEADER)) -> None:
 
 
 def _invalidate_key_cache() -> None:
-    """Force the next request to reload keys from Supabase."""
     global _api_key_cache_ts
     _api_key_cache_ts = 0.0
 
 
 # ── App setup ─────────────────────────────────────────────────────────────────
-app = FastAPI(title="SAMA NORA Chatbot", version="3.4.0")
+app = FastAPI(title="SAMA NORA Chatbot", version="3.5.0")
 
 _raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000")
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -160,6 +148,31 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# ── Startup: preload models ───────────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    """
+    Preload embedder and reranker during FastAPI startup so they are ready
+    before the first request arrives. On Azure, this prevents the reranker
+    (2.3GB) from downloading mid-request and causing a 504 timeout.
+    """
+    from simple_rag import _get_embedder, _get_reranker
+    try:
+        log.info("[startup] Preloading embedder...")
+        _get_embedder()
+        log.info("[startup] Embedder ready.")
+    except Exception as e:
+        log.error(f"[startup] Embedder preload failed: {e}")
+
+    try:
+        log.info("[startup] Preloading reranker...")
+        _get_reranker()
+        log.info("[startup] Reranker ready.")
+    except Exception as e:
+        log.error(f"[startup] Reranker preload failed (will retry on first request): {e}")
+
 
 # ── Request / response models ─────────────────────────────────────────────────
 
@@ -201,13 +214,12 @@ class FeedbackRequest(BaseModel):
 
 
 class CreateKeyRequest(BaseModel):
-    label: str  # e.g. "ZetaLabs Internal", "Client A"
+    label: str
 
 
 # ── Helper: detect not-found answers ─────────────────────────────────────────
 
 def _answer_is_not_found(answer: str) -> bool:
-    """Return True if the LLM answered that no information was found."""
     a = answer.lower()
     return any(p in a for p in [
         "does not contain", "cannot find", "not found in",
@@ -401,7 +413,7 @@ def _get_session_summary(session_id: str) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "3.4.0"}
+    return {"status": "ok", "version": "3.5.0"}
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -565,7 +577,6 @@ def get_session_messages(session_id: str, limit: int = 20, _: None = Depends(_re
 
 @app.get("/api/conversations")
 def list_conversations(user_id: str = "", limit: int = 50, _: None = Depends(_require_api_key)):
-    """Return all sessions for a user, sorted newest first, with title = first message."""
     if not user_id:
         return {"conversations": []}
     try:
@@ -606,10 +617,6 @@ def list_conversations(user_id: str = "", limit: int = 50, _: None = Depends(_re
 
 @app.get("/api/documents")
 def list_documents(search: str = "", limit: int = 20, _: None = Depends(_require_api_key)):
-    """
-    Return all documents from the documents table as the source of truth,
-    with chunk counts joined from sama_nora_chunks.
-    """
     try:
         doc_resp = _sb_with_retry(
             lambda sb: sb.table("documents")
@@ -656,7 +663,6 @@ def list_documents(search: str = "", limit: int = 20, _: None = Depends(_require
 
 @app.get("/admin/stats")
 def admin_stats():
-    """Return system metrics for the dashboard info card."""
     docs_count = 0
     try:
         d = _sb_with_retry(
@@ -675,6 +681,7 @@ def admin_stats():
     except Exception as e:
         log.warning(f"[stats] chunks count failed: {e}")
 
+    # Count v2 hash-based cache entries
     cached_answers = 0
     try:
         redis_url = os.getenv("REDIS_URL", "")
@@ -684,7 +691,7 @@ def admin_stats():
                 redis_url, socket_timeout=2,
                 socket_connect_timeout=2, decode_responses=False,
             )
-            cached_answers = r.llen("sama:cache:embeddings")
+            cached_answers = sum(1 for _ in r.scan_iter("sama:cache:v2:*"))
     except Exception:
         pass
 
@@ -717,14 +724,14 @@ def cache_status():
         import redis as redis_lib
         r = redis_lib.from_url(redis_url, socket_timeout=3, socket_connect_timeout=3, decode_responses=False)
         r.ping()
-        count = r.llen("sama:cache:embeddings")
-        ttl   = r.ttl("sama:cache:embeddings")
+        # Count v2 hash-based cache entries
+        count = sum(1 for _ in r.scan_iter("sama:cache:v2:*"))
         return {
             "backend":        "redis",
             "connected":      True,
             "cached_entries": count,
-            "ttl_seconds":    ttl,
-            "ttl_days":       round(ttl / 86400, 1) if ttl > 0 else "no expiry set",
+            "key_pattern":    "sama:cache:v2:*",
+            "ttl_days":       30,
         }
     except Exception as e:
         return {"backend": "redis", "connected": False, "error": str(e)}
@@ -757,19 +764,13 @@ def cache_clear(api_key: str = ""):
 
 @app.post("/admin/keys")
 def create_api_key(req: CreateKeyRequest, admin_key: str = ""):
-    """
-    Generate a new API key for a client/user.
-    Requires ADMIN_API_KEY in the admin_key query param (if set in env).
-    Example: POST /admin/keys?admin_key=xxx  {"label": "Client A"}
-    Returns the raw key ONCE — store it securely, it cannot be retrieved again.
-    """
     expected = os.getenv("ADMIN_API_KEY", "")
     if expected and admin_key != expected:
         raise HTTPException(status_code=403, detail="Invalid admin key")
     if not req.label or not req.label.strip():
         raise HTTPException(status_code=400, detail="label cannot be empty")
 
-    new_key = secrets.token_hex(32)  # 64-char hex string
+    new_key = secrets.token_hex(32)
     try:
         result = _sb_with_retry(
             lambda sb: sb.table("api_keys").insert({
@@ -794,10 +795,6 @@ def create_api_key(req: CreateKeyRequest, admin_key: str = ""):
 
 @app.get("/admin/keys")
 def list_api_keys(admin_key: str = ""):
-    """
-    List all API keys (labels + status only, raw key values are never returned).
-    Requires ADMIN_API_KEY in the admin_key query param (if set in env).
-    """
     expected = os.getenv("ADMIN_API_KEY", "")
     if expected and admin_key != expected:
         raise HTTPException(status_code=403, detail="Invalid admin key")
@@ -816,11 +813,6 @@ def list_api_keys(admin_key: str = ""):
 
 @app.delete("/admin/keys/{key_id}")
 def revoke_api_key(key_id: str, admin_key: str = ""):
-    """
-    Revoke an API key by its UUID (get UUID from GET /admin/keys).
-    Requires ADMIN_API_KEY in the admin_key query param (if set in env).
-    The key is deactivated, not deleted — audit trail is preserved.
-    """
     expected = os.getenv("ADMIN_API_KEY", "")
     if expected and admin_key != expected:
         raise HTTPException(status_code=403, detail="Invalid admin key")

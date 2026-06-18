@@ -1,0 +1,24 @@
+{
+  "run_date": "2026-06-18T15:49:40.202060",
+  "total_questions": 2721,
+  "completed": 0,
+  "elapsed_seconds": 0,
+  "elapsed_min": 0.0,
+  "counts": {
+    "PASS": 0,
+    "FAIL": 0,
+    "NOT_FOUND": 0,
+    "PARTIAL": 0,
+    "ERROR": 0,
+    "UNKNOWN": 0
+  },
+  "pass_rate_pct": 0,
+  "not_found_pct": 0,
+  "fail_rate_pct": 0,
+  "avg_time_ms": 0,
+  "p50_time_ms": 0,
+  "p95_time_ms": 0,
+  "avg_reranker": null,
+  "crag_retries": 0,
+  "by_category": {}
+}

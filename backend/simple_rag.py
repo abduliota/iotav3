@@ -44,14 +44,26 @@ Improvements in this version:
   - [Step 6] Prevents English chunk dominance for Arabic regulatory queries
   - [Step 5] BGE-M3 parallel column: USE_BGE_COLUMN=true switches to 1024-dim
   - [Step 5] Zero downtime upgrade — old e5-small pipeline preserved as fallback
+  - [Step 7] CRAG: when LLM returns not-found with reranker_score ≥ 0.7, retry with regulatory-normalized query
+  - [Step 7] _normalize_to_regulatory_language(): LLM rewrites query in formal SAMA/NCA/PDPL terminology (no hardcoding)
 """
 
 from __future__ import annotations
-import os, re, json
+import os, re, json, hashlib
 import numpy as np
 from typing import Callable, Optional
 from dotenv import load_dotenv
 load_dotenv()
+
+# ── Pre-initialize torch at module level ──────────────────────────────────────
+# CRITICAL: torch must be imported here (module level) NOT inside _get_embedder().
+# On Windows, lazy-importing torch inside an async startup event / uvicorn worker
+# thread causes a CUDA DLL initialization crash (segfault, no traceback).
+# Importing at module level runs during `from simple_rag import answer_query`
+# in api.py — before uvicorn starts any worker threads or async event loops.
+import torch as _torch
+_TORCH_DEVICE = "cuda" if _torch.cuda.is_available() else "cpu"
+print(f"[torch] Initialized. Device: {_TORCH_DEVICE.upper()}, version: {_torch.__version__}")
 
 SUPABASE_URL         = os.environ["SUPABASE_URL"]
 SUPABASE_KEY         = (os.environ.get("SUPABASE_KEY") or
@@ -81,6 +93,7 @@ USE_BGE_COLUMN        = os.getenv("USE_BGE_COLUMN", "false").lower() == "true"
 CACHE_BACKEND        = os.getenv("CACHE_BACKEND", "memory")
 CACHE_SIM_THRESH     = float(os.getenv("CACHE_SIMILARITY_THRESH", "0.95"))
 CACHE_TTL_SECONDS    = int(os.getenv("CACHE_TTL_SECONDS", "2592000"))
+CRAG_RERANKER_THRESHOLD = float(os.getenv("CRAG_RERANKER_THRESHOLD", "0.7"))  # retry threshold
 REDIS_URL            = os.getenv("REDIS_URL", "")
 
 NOT_FOUND = (
@@ -195,7 +208,16 @@ ABSOLUTELY FORBIDDEN
 - Do not invent or guess organization names, SAR amounts, percentages, or article numbers not present in the context.
 - Do not add a concluding sentence that generalizes, contextualizes, or extends beyond what the passages state.
 - Do not combine information from the context with your general training knowledge about Saudi regulations, Basel III, or any other regulatory framework.
-- Do not answer out-of-scope questions about weather, sports, general knowledge, company information, or topics unrelated to Saudi banking, cybersecurity, and data protection regulation."""
+- Do not answer out-of-scope questions about weather, sports, general knowledge, company information, or topics unrelated to Saudi banking, cybersecurity, and data protection regulation.
+
+═══════════════════════════════════════════════════
+SEMANTIC EQUIVALENCE — apply when answering
+═══════════════════════════════════════════════════
+10. When the user's question uses informal, colloquial, or business terms, extract answers from passages that use the formal regulatory equivalent. Do NOT refuse to answer simply because the user's wording differs from the passage wording. Examples of equivalences (apply generally — not limited to these):
+- "SME" / "small business" / "small enterprise" → SAMA documents say "juristic person", "commercial entity", "resident company", "small establishment"
+- "account opening for companies" → SAMA EN 1644 Section 300 covers "juristic persons" and "resident companies"
+- "data privacy fine" → PDPL "penalty" or "violation"
+- If the user asks about X and the context covers the regulatory equivalent of X, extract and report the answer."""
 
 
 OUT_OF_SCOPE_PATTERNS = [
@@ -1076,12 +1098,11 @@ def _get_supabase():
 def _get_embedder():
     global _embedder
     if _embedder is None:
-        import torch
         from sentence_transformers import SentenceTransformer
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[embedder] Loading {EMBEDDING_MODEL} on {device.upper()}...")
-        _embedder = SentenceTransformer(EMBEDDING_MODEL, device=device)
-        print(f"[embedder] Ready on {device.upper()}.")
+        # Use module-level _TORCH_DEVICE (torch already initialized at import time)
+        print(f"[embedder] Loading {EMBEDDING_MODEL} on {_TORCH_DEVICE.upper()}...")
+        _embedder = SentenceTransformer(EMBEDDING_MODEL, device=_TORCH_DEVICE)
+        print(f"[embedder] Ready on {_TORCH_DEVICE.upper()}.")
     return _embedder
 
 def _get_reranker():
@@ -1101,11 +1122,10 @@ def _get_qwen():
     global _qwen_pipe
     if _qwen_pipe is None:
         from transformers import pipeline
-        import torch
         print(f"[llm] Loading {QWEN_MODEL_ID}...")
         _qwen_pipe = pipeline(
             "text-generation", model=QWEN_MODEL_ID,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            dtype=_torch.float16 if _TORCH_DEVICE == "cuda" else _torch.float32,
             device_map="auto", trust_remote_code=True,
         )
         print("[llm] Loaded.")
@@ -1120,8 +1140,7 @@ def _get_redis():
             socket_timeout=2, socket_connect_timeout=2,
         )
         client.ping()
-        count = client.llen("sama:cache:embeddings")
-        print(f"[cache] Redis connected. Cached entries: {count}")
+        print(f"[cache] Redis connected.")
         _redis_client = client
     return _redis_client
 
@@ -1130,56 +1149,51 @@ def _embed(text: str) -> list[float]:
     prefixed = f"query: {text}" if "e5" in EMBEDDING_MODEL.lower() else text
     return model.encode(prefixed, normalize_embeddings=True).tolist()
 
-_EMBED_KEY = "sama:cache:embeddings"
+# ── Hash-based cache (v2) ─────────────────────────────────────────────────────
+# Each query gets its own Redis key using a SHA256 hash of the normalized text.
+# This replaces the old list-based approach which fetched ALL embeddings on
+# every lookup (33MB+) and exceeded Upstash's 10MB request limit.
+# O(1) lookup, self-expiring (TTL), no size growth issues.
 
-def _cache_lookup(vec: list[float]) -> dict | None:
+def _normalize_for_cache(q: str) -> str:
+    return re.sub(r'\s+', ' ', q.lower().strip())
+
+def _cache_key(query: str) -> str:
+    h = hashlib.sha256(_normalize_for_cache(query).encode()).hexdigest()[:24]
+    return f"sama:cache:v2:{h}"
+
+def _cache_lookup(query: str) -> dict | None:
     if not CACHE_ENABLED: return None
     if CACHE_BACKEND == "redis" and REDIS_URL:
         try:
             r = _get_redis()
-            raw_list = r.lrange(_EMBED_KEY, 0, -1)
-            if not raw_list: return None
-            q = np.array(vec)
-            best_idx, best_sim = -1, 0.0
-            for i, raw in enumerate(raw_list):
-                cached_vec = np.array(json.loads(raw))
-                if cached_vec.shape != q.shape:
-                    # Dimension mismatch — embedding model changed; skip cache
-                    print(f"[cache] Dimension mismatch ({cached_vec.shape} vs {q.shape}) — cache miss")
-                    break
-                sim = float(np.dot(q, cached_vec))
-                if sim > best_sim:
-                    best_sim, best_idx = sim, i
-            if best_sim >= CACHE_SIM_THRESH and best_idx >= 0:
-                raw_result = r.get(f"sama:cache:results:{best_idx}")
-                if raw_result:
-                    print(f"[cache] HIT (redis sim={best_sim:.4f})")
-                    return json.loads(raw_result)
+            data = r.get(_cache_key(query))
+            if data:
+                print(f"[cache] HIT (redis)")
+                return json.loads(data)
+            return None
         except Exception as e:
             print(f"[cache] Redis lookup failed: {e}")
     else:
-        q = np.array(vec)
+        norm = _normalize_for_cache(query)
         for entry in _mem_cache:
-            if float(np.dot(q, np.array(entry["embedding"]))) >= CACHE_SIM_THRESH:
+            if entry.get("query") == norm:
                 print("[cache] HIT (memory)")
                 return entry["result"]
     return None
 
-def _cache_store(vec: list[float], result: dict) -> None:
+def _cache_store(query: str, result: dict) -> None:
     if not CACHE_ENABLED: return
     if CACHE_BACKEND == "redis" and REDIS_URL:
         try:
             r = _get_redis()
-            idx = r.llen(_EMBED_KEY)
-            r.rpush(_EMBED_KEY, json.dumps(vec))
-            r.setex(f"sama:cache:results:{idx}", CACHE_TTL_SECONDS, json.dumps(result))
-            r.expire(_EMBED_KEY, CACHE_TTL_SECONDS)
-            print(f"[cache] STORED redis idx={idx}")
+            r.setex(_cache_key(query), CACHE_TTL_SECONDS, json.dumps(result))
+            print(f"[cache] STORED (redis)")
         except Exception as e:
             print(f"[cache] Redis store failed: {e}")
-            _mem_cache.append({"embedding": vec, "result": result})
+            _mem_cache.append({"query": _normalize_for_cache(query), "result": result})
     else:
-        _mem_cache.append({"embedding": vec, "result": result})
+        _mem_cache.append({"query": _normalize_for_cache(query), "result": result})
 
 
 
@@ -1616,6 +1630,77 @@ def _generate(ctx: str, query: str, on_chunk: Optional[Callable] = None,
         return _generate_azure(ctx, query, on_chunk, session_summary, max_tokens, max_sentences)
     return _generate_qwen(ctx, query, on_chunk, session_summary, max_tokens, max_sentences)
 
+
+# ── [Step 7 — CRAG] Regulatory terminology normalisation ─────────────────────
+
+def _normalize_to_regulatory_language(query: str) -> str:
+    """
+    [Step 7 — CRAG] Dynamically rephrase a query using formal Saudi regulatory
+    terminology as it appears in SAMA, NCA, and PDPL documents.
+
+    No hardcoded term mappings — the LLM figures out equivalences:
+      "SME bank account"   → "juristic person resident company bank account commercial registration"
+      "data privacy fine"  → "personal data protection penalty violation PDPL"
+      "hacking rules"      → "cybersecurity unauthorized access controls NCA ECC"
+
+    Used as a 6th RAG-Fusion pool and as the CRAG retry query when the first
+    pass returns not-found despite a high reranker score (≥ CRAG_RERANKER_THRESHOLD).
+
+    Falls back to the original query silently on any failure.
+    """
+    if len(query.split()) < 3:
+        return query
+
+    prompt = (
+        "You are a Saudi banking and cybersecurity regulation expert.\n"
+        "Rephrase the following question using ONLY formal regulatory terminology "
+        "exactly as it appears in official SAMA, NCA, or PDPL documents.\n\n"
+        "Rules:\n"
+        "- Replace informal/business terms with their formal regulatory equivalents\n"
+        "- Stay in the same language as the input question\n"
+        "- Keep it concise (under 20 words)\n"
+        "- Return ONLY the rephrased query, nothing else\n\n"
+        "Examples:\n"
+        "- 'SME bank account opening' → 'juristic person resident company bank account commercial registration SAMA'\n"
+        "- 'small business bank rules' → 'commercial entity juristic person bank account requirements SAMA EN 1644'\n"
+        "- 'data privacy fine Saudi' → 'personal data protection law PDPL penalty violation SDAIA'\n"
+        "- 'hacking prevention controls' → 'cybersecurity unauthorized access controls NCA ECC essential'\n"
+        "- 'liquidity rule banks' → 'liquidity coverage ratio LCR HQLA net cash outflows Basel III'\n\n"
+        f"Question: {query}"
+    )
+
+    try:
+        if LLM_BACKEND == "azure" and AZURE_OPENAI_KEY and AZURE_ENDPOINT:
+            import openai as _oai
+            client = _oai.AzureOpenAI(
+                api_key=AZURE_OPENAI_KEY,
+                azure_endpoint=AZURE_ENDPOINT,
+                api_version="2024-02-01",
+            )
+            model = AZURE_DEPLOYMENT
+        elif OPENAI_API_KEY:
+            import openai as _oai
+            client = _oai.OpenAI(api_key=OPENAI_API_KEY)
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        else:
+            return query
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=80,
+            temperature=0,
+        )
+        normalized = resp.choices[0].message.content.strip().strip("\"' ")
+        if normalized and len(normalized) > 5 and normalized.lower() != query.lower():
+            print(f"[reg_norm] \'{query[:60]}\' → \'{normalized[:80]}\'")
+            return normalized
+    except Exception as e:
+        print(f"[reg_norm] Failed (non-fatal): {e}")
+
+    return query
+
+
 def answer_query(
     user_query: str,
     top_k: int | None = None,
@@ -1668,7 +1753,7 @@ def answer_query(
     expanded  = _inject_domain_anchor(query, expanded)
     query_vec = _embed(expanded)
 
-    cached = _cache_lookup(query_vec)
+    cached = _cache_lookup(query)
     if cached:
         # Issue 2 Fix: strip any inline citations from cached answers before returning
         cached_answer = _strip_inline_citations(cached.get("answer", ""))
@@ -1723,9 +1808,22 @@ def answer_query(
             if sb_res:
                 max_raw_sim = max(max_raw_sim,
                     max(float(c.get("similarity", 0)) for c in sb_res))
+        # [Step 7] Add regulatory-normalized query as extra pool
+        reg_normalized = _normalize_to_regulatory_language(query)
+        if reg_normalized.lower() != query.lower():
+            rn_exp = _inject_domain_anchor(reg_normalized, _expand_query(reg_normalized))
+            rn_vec = _embed(rn_exp)
+            rn_res = _fetch(rn_exp, rn_vec, limit=fetch_k, subject=subject)
+            all_results.append(rn_res)
+            if rn_res:
+                max_raw_sim = max(max_raw_sim,
+                    max(float(c.get("similarity", 0)) for c in rn_res))
+        else:
+            reg_normalized = query  # same — will skip CRAG attempt with it
+
         candidates = _reciprocal_rank_fusion(all_results)[:fetch_k]
         if debug:
-            n = len(variants) + (1 if step_back else 0)
+            n = len(variants) + (1 if step_back else 0) + (1 if reg_normalized.lower() != query.lower() else 0)
             print(f'[pipeline] {n} query pools -> {len(candidates)} RRF-merged candidates | raw_sim={max_raw_sim:.4f}')
     elif step_back:
         # RAG-Fusion off but step-back on — merge original + abstract
@@ -1769,17 +1867,48 @@ def answer_query(
                        max_tokens=max_tokens, max_sentences=max_sentences)
     answer = _strip_trailing_not_found(answer)
 
-    # If LLM says not found, return empty sources
+    # [Step 7 — CRAG] If LLM says not-found but reranker found high-confidence content,
+    # the issue is likely a terminology mismatch. Retry using the regulatory-normalized query.
     if _is_not_found_answer(answer):
-        if debug: print(f"[pipeline] LLM returned not-found — clearing sources for clean UX")
-        return {
-            "answer": answer,
-            "sources": [],
-            "cached": False,
-            "method": "generative",
-            "candidate_count": len(candidates),
-            "reranker_top_score": reranker_top_score,
-        }
+        crag_succeeded = False
+
+        if reranker_top_score and reranker_top_score >= CRAG_RERANKER_THRESHOLD:
+            # Try to get reg_normalized from outer scope (RAG-Fusion path) or generate fresh
+            _rn = locals().get("reg_normalized") or _normalize_to_regulatory_language(query)
+            print(f"[crag] Not-found despite reranker={reranker_top_score:.3f}. Retrying with normalized query...")
+            if _rn and _rn.lower() != query.lower():
+                _rn_exp = _inject_domain_anchor(_rn, _expand_query(_rn))
+                _rn_vec = _embed(_rn_exp)
+                _rn_raw = _fetch(_rn_exp, _rn_vec, limit=fetch_k, subject=subject)
+                if _rn_raw:
+                    _rn_chunks, _rn_score = rerank_chunks(_rn, _rn_raw, top_n=final_top_k)
+                    # Use original query so the LLM answers in user-friendly language
+                    _crag_answer = _generate(
+                        build_context(_rn_chunks), query,
+                        None, session_summary=session_summary,
+                        max_tokens=max_tokens, max_sentences=max_sentences,
+                    )
+                    _crag_answer = _strip_trailing_not_found(_crag_answer)
+                    if not _is_not_found_answer(_crag_answer):
+                        print(f"[crag] Retry succeeded!")
+                        answer = _crag_answer
+                        chunks = _rn_chunks
+                        if _rn_score:
+                            reranker_top_score = _rn_score
+                        crag_succeeded = True
+                    else:
+                        print(f"[crag] Retry still not-found. Returning not-found.")
+
+        if not crag_succeeded:
+            if debug: print(f"[pipeline] LLM returned not-found — clearing sources for clean UX")
+            return {
+                "answer": answer,
+                "sources": [],
+                "cached": False,
+                "method": "generative",
+                "candidate_count": len(candidates),
+                "reranker_top_score": reranker_top_score,
+            }
 
     seen: set[tuple] = set()
     sources = []
@@ -1799,7 +1928,7 @@ def answer_query(
     result = {"answer": answer, "sources": sources, "cached": False, "method": "generative",
              "candidate_count": len(candidates), "reranker_top_score": reranker_top_score}
     if not _is_not_found_answer(answer):
-        _cache_store(query_vec, result)
+        _cache_store(query, result)
     return result
 
 
